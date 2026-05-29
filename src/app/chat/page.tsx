@@ -147,12 +147,17 @@ function ChatPageInner() {
     for (const r of rooms) socket.send({ type: "subscribe", room_id: r.room_id });
   }, [socket.ready, rooms, socket.send]);
 
-  // When an event arrives in a room we don't have locally yet, refresh.
+  // When an event arrives in a room we don't have locally yet — OR when
+  // Glass tells us a fresh RoomMember was created for us (#2) — refresh the
+  // sidebar so the new conversation surfaces without a page reload.
   React.useEffect(() => {
     if (!socket.lastFrame) return;
-    if (socket.lastFrame.type === "event") {
-      const rid = socket.lastFrame.room_id;
+    const f = socket.lastFrame;
+    if (f.type === "event") {
+      const rid = f.room_id;
       if (!rooms.some((r) => r.room_id === rid)) void refresh();
+    } else if (f.type === "room.added") {
+      if (!rooms.some((r) => r.room_id === f.room_id)) void refresh();
     }
   }, [socket.lastFrame, rooms, refresh]);
 

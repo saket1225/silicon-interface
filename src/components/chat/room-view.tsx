@@ -54,6 +54,48 @@ export function RoomView({ room, socket }: Props) {
   const [search, setSearch] = React.useState<string | null>(null);
   const [droppedFile, setDroppedFile] = React.useState<File | null>(null);
   const [isDropTarget, setIsDropTarget] = React.useState(false);
+  // #5 — Per-handle activity state. Each entry expires after `until`.
+  const [activities, setActivities] = React.useState<
+    Record<string, { state: "typing" | "uploading" | "recording"; until: number }>
+  >({});
+  // Clear expired activity entries on a 2s interval.
+  React.useEffect(() => {
+    const id = window.setInterval(() => {
+      const now = Date.now();
+      setActivities((prev) => {
+        const out: typeof prev = {};
+        let changed = false;
+        for (const [h, a] of Object.entries(prev)) {
+          if (a.until > now) out[h] = a;
+          else changed = true;
+        }
+        return changed ? out : prev;
+      });
+    }, 2000);
+    return () => window.clearInterval(id);
+  }, []);
+  // Build a (kind, id) → handle lookup so activity frames can name a sender.
+  const memberHandleLookup = React.useMemo(() => {
+    const m = new Map<string, string>();
+    for (const p of room.peers) {
+      m.set(`${p.kind}.${p.handle}`, p.handle);
+    }
+    return m;
+  }, [room.peers]);
+  const handleFor = React.useCallback(
+    (kind: "carbon" | "silicon", id: number): string | null => {
+      // We don't reliably know peer member_id ↔ handle on the client (Glass
+      // doesn't expose Carbon.id). For 1-on-1 rooms there's exactly one
+      // peer — assume it's them. For groups we'd need an extra projection;
+      // until then we degrade gracefully to a generic "typing…".
+      if (room.peers.length === 1) return room.peers[0].handle;
+      // Fallback: any peer whose kind matches.
+      return room.peers.find((p) => p.kind === kind)?.handle ?? null;
+    },
+    // memberHandleLookup is used for future group lookups; kept in deps so
+    // a future projection refresh re-evaluates.
+    [room.peers, memberHandleLookup],
+  );
 
   const endRef = React.useRef<HTMLDivElement>(null);
   const sectionRef = React.useRef<HTMLElement>(null);
@@ -220,6 +262,29 @@ export function RoomView({ room, socket }: Props) {
             },
           };
         });
+      }
+      // #5 — Activity beacon (typing | uploading | recording). Skip my own
+      // beacons; track per-handle so we can show "@alice is recording…"
+      // alongside any other active state.
+      const kind = f.kind;
+      if (kind === "typing" || kind === "uploading" || kind === "recording") {
+        const memberKind = f.member_kind;
+        const memberId = f.member_id;
+        if (
+          memberId !== undefined &&
+          (memberKind === "carbon" || memberKind === "silicon")
+        ) {
+          const handle = handleFor(memberKind, memberId);
+          if (handle && handle !== myUsername) {
+            const active = f.is_typing !== false;
+            setActivities((prev) => {
+              const next = { ...prev };
+              if (active) next[handle] = { state: kind, until: Date.now() + 8000 };
+              else delete next[handle];
+              return next;
+            });
+          }
+        }
       }
     }
   }, [socket.lastFrame, room.room_id, myUsername]);
@@ -469,7 +534,9 @@ export function RoomView({ room, socket }: Props) {
               {display.name}
             </h2>
             <p className="truncate text-xs text-muted-foreground">
-              {socket.ready ? display.subtitle : "offline"}
+              {socket.ready
+                ? (formatActivities(activities) ?? display.subtitle)
+                : "offline"}
             </p>
           </div>
         </button>
@@ -630,6 +697,31 @@ function isMyEvent(e: Event, myUsername: string | null) {
  *   optimistic placeholders, and any just-sent rows that didn't fit in the
  *   100-event polling window).
  */
+/**
+ * Render the active-state map as a single subtitle line.
+ *   • @alice is typing…
+ *   • @alice is uploading…
+ *   • @alice is recording…
+ *   • @alice, @bob are typing…
+ * Returns null when nothing is active, so the caller falls back to the
+ * static room subtitle.
+ */
+function formatActivities(
+  acts: Record<string, { state: "typing" | "uploading" | "recording"; until: number }>,
+): string | null {
+  const entries = Object.entries(acts);
+  if (entries.length === 0) return null;
+  // If everyone is doing the same thing, fold the verb. Otherwise pick one.
+  const states = new Set(entries.map(([, a]) => a.state));
+  const verb = states.size === 1 ? [...states][0] : "typing";
+  const handles = entries.map(([h]) => `@${h}`);
+  const who =
+    handles.length === 1
+      ? handles[0]
+      : `${handles.slice(0, -1).join(", ")} & ${handles.slice(-1)}`;
+  return `${who} is ${verb}…`;
+}
+
 function mergeServerEvents(
   prev: LocalEvent[],
   server: Event[],

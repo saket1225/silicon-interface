@@ -23,6 +23,7 @@ import { cn, relativeTime } from "@/lib/utils";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { IdAvatar } from "@/components/profile/id-avatar";
+import { LinkPreviewCard } from "@/components/chat/link-preview-card";
 import { MediaAttachment } from "@/components/chat/media-attachment";
 import {
   DropdownMenu,
@@ -462,6 +463,7 @@ function Body({ event }: { event: Event }) {
       return (
         <div className="whitespace-pre-wrap break-words">
           {renderMarkdown(String(c.body ?? ""))}
+          {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
         </div>
       );
     case "m.image":

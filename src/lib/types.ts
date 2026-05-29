@@ -204,6 +204,14 @@ export interface InviteInfo {
   role: string;
 }
 
+export interface LinkPreview {
+  url: string;
+  host: string;
+  title: string;
+  description: string;
+  image: string;
+}
+
 export interface Event {
   event_id: string;
   room: number;
@@ -218,6 +226,9 @@ export interface Event {
   edited_at: string | null;
   redacted_at: string | null;
   redaction_reason: string;
+  /** #25 — OG-style link preview projection, only set when body contains
+   *  exactly one URL. */
+  link_preview?: LinkPreview | null;
 }
 
 export interface MediaObject {
@@ -231,6 +242,11 @@ export interface MediaObject {
   kind: "file" | "image" | "voice" | "tts_output";
   transcript: string;
   duration_ms: number | null;
+  /** #6 — pre-computed audio waveform peaks (0..1, ~60 buckets). */
+  peaks: number[] | null;
+  /** #22 — pixel dimensions for image/video so bubbles reserve aspect. */
+  width: number | null;
+  height: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -308,8 +324,16 @@ export type WsFrame =
       summary?: string;
       sender_kind?: Kind;
       sender_id?: number;
-      kind?: string; // 'typing' overload
+      /** 'typing' | 'uploading' | 'recording' for activity indicators. */
+      kind?: string;
       member_kind?: Kind;
       member_id?: number;
       is_typing?: boolean;
+    }
+  | {
+      /** #2 — a new room was added with me as a member. The sidebar should
+       *  re-fetch /api/v1/rooms/ to project the row. */
+      type: "room.added";
+      room_id: string;
+      kind: "direct" | "group";
     };

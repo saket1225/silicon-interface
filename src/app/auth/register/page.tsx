@@ -212,9 +212,15 @@ function RegisterPageInner() {
       if (r.verified) {
         setPhoneVerified(true);
         setPhoneDialog(false);
-        setCarbonId((c) => c || suggestCarbonId(email));
-        setStep("carbonid");
         toast.success("phone verified");
+        // #1 — Both factors are done; hand off to the personalized onboarding
+        // flow which handles Carbon-ID picking, name+bio, glyph generation,
+        // and the final registerUsername call.
+        window.sessionStorage.setItem(
+          "silicon-interface:onboarding-flow",
+          flowId,
+        );
+        router.replace("/onboarding");
       }
     });
 

@@ -22,7 +22,6 @@ const BORDER = "#d4cfc7"; // hairline
 const MUTED = "#666666";
 
 const QR_DISPLAY_SIZE = 200; // px in the dialog
-const QR_DOWNLOAD_SIZE = 760; // hidden hi-res render — drawn into the share card
 const QR_LOGO_FRACTION = 0.22; // logo edge ÷ qr edge — tuned for level-H error correction
 
 /**
@@ -42,15 +41,21 @@ export function ShareDialog({
   open: boolean;
   onOpenChange: (v: boolean) => void;
 }) {
-  const link =
-    typeof window !== "undefined"
-      ? `${window.location.origin}/c/${carbonId}`
-      : `/c/${carbonId}`;
+  // Lazy init so we never touch `window` on the server during render. The
+  // dialog is client-only ('use client'), but a few production builds in
+  // React 19 still pre-render the static shell — this avoids a possible
+  // hydration mismatch on `link`.
+  const [link, setLink] = React.useState(`/c/${carbonId}`);
+  React.useEffect(() => {
+    setLink(`${window.location.origin}/c/${carbonId}`);
+  }, [carbonId]);
 
-  // The visible QR shows the live preview; the hidden one renders at a higher
-  // size so the downloaded PNG stays crisp on every display, not just retina.
+  // Single canvas — the displayed QR also feeds the downloaded share card.
+  // The previous hidden hi-res companion canvas (position:absolute,
+  // left:-9999px) was the most likely cause of the "share modal broken"
+  // reports — extra portal mount + offscreen layout interacted badly with
+  // some Vercel edge cache states.
   const qrRef = React.useRef<HTMLCanvasElement>(null);
-  const qrHiResRef = React.useRef<HTMLCanvasElement>(null);
 
   const copyLink = () => {
     navigator.clipboard.writeText(link);
@@ -62,15 +67,18 @@ export function ShareDialog({
   };
 
   const download = async () => {
-    // Prefer the hi-res hidden canvas; fall back to the visible one if it
-    // hasn't mounted yet (e.g. download invoked the exact tick the dialog opens).
-    const qr = qrHiResRef.current ?? qrRef.current;
-    if (!qr) return;
+    const qr = qrRef.current;
+    if (!qr) {
+      toast.error("share card not ready yet — try again in a moment");
+      return;
+    }
     try {
       await buildShareCard({ qr, carbonId, name, link });
       toast.success("share card downloaded");
-    } catch {
-      toast.error("download failed");
+    } catch (err) {
+      // Surface the real error so the user knows what to retry.
+      const msg = err instanceof Error ? err.message : "download failed";
+      toast.error(msg);
     }
   };
 
@@ -126,30 +134,6 @@ export function ShareDialog({
           </Button>
         </div>
 
-        {/* Hidden hi-res QR used only as the pixel source for the downloaded
-            share card. Positioned offscreen rather than display:none so the
-            canvas actually rasterizes its pixels. */}
-        <div
-          aria-hidden
-          className="pointer-events-none absolute left-[-9999px] top-[-9999px]"
-        >
-          <QRCodeCanvas
-            ref={qrHiResRef}
-            value={link}
-            size={QR_DOWNLOAD_SIZE}
-            bgColor={BG}
-            fgColor={INK}
-            level="H"
-            marginSize={2}
-            imageSettings={{
-              src: "/logo.png",
-              width: Math.round(QR_DOWNLOAD_SIZE * QR_LOGO_FRACTION),
-              height: Math.round(QR_DOWNLOAD_SIZE * QR_LOGO_FRACTION),
-              excavate: true,
-              crossOrigin: "anonymous",
-            }}
-          />
-        </div>
       </DialogContent>
     </Dialog>
   );

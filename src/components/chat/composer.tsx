@@ -14,7 +14,10 @@ import {
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
+import { searchEmoji } from "@/lib/emoji";
+import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
 import type { Event, EventType } from "@/lib/types";
+import { cn } from "@/lib/utils";
 
 import { Button } from "@/components/ui/button";
 import { VoiceRecorder } from "@/components/chat/voice-recorder";
@@ -100,6 +103,43 @@ function StagedAttachment({ file, onRemove }: { file: File; onRemove: () => void
   );
 }
 
+/**
+ * Inline emoji picker rendered above the textarea when the user types `:`.
+ * Up/down navigates, Tab/Enter inserts. Mouse click inserts.
+ */
+function EmojiQuickPicker({
+  query,
+  selectedIndex,
+  onPick,
+}: {
+  query: string;
+  selectedIndex: number;
+  onPick: (emoji: string) => void;
+}) {
+  const results = React.useMemo(() => searchEmoji(query, 24), [query]);
+  if (results.length === 0) return null;
+  return (
+    <div className="absolute bottom-full left-0 z-50 mb-2 flex max-w-md flex-wrap gap-1 border bg-card p-2 shadow-md">
+      {results.map((r, i) => (
+        <button
+          key={r.name}
+          type="button"
+          onClick={() => onPick(r.emoji)}
+          className={cn(
+            "inline-flex h-8 w-8 items-center justify-center border transition-colors hover:bg-accent",
+            i === selectedIndex
+              ? "border-foreground bg-accent"
+              : "border-transparent",
+          )}
+          title={`:${r.name}:`}
+        >
+          <span className="text-lg leading-none">{r.emoji}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** Quick one-line label of an event for the reply preview chip. */
 function previewOf(ev: Event): string {
   const c = ev.content as Record<string, unknown>;
@@ -141,6 +181,11 @@ export function Composer({
   const [busy, setBusy] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
+  // #21 — Emoji picker triggered by `:` followed by alphanumerics. We track
+  // the active token (':grin', ':lol', …) and surface matches in a small
+  // popover anchored to the textarea.
+  const [emojiQuery, setEmojiQuery] = React.useState<string | null>(null);
+  const [emojiIdx, setEmojiIdx] = React.useState(0);
 
   // Pull dropped files in from RoomView. We only treat it as a hint — the
   // parent clears its own state via `onDroppedFileConsumed` once we've taken
@@ -151,6 +196,27 @@ export function Composer({
       onDroppedFileConsumed?.();
     }
   }, [droppedFile, onDroppedFileConsumed]);
+
+  // #5 — Typing beacon. POSTs `activity('typing', true)` on the first
+  // character and `false` after 3s of idle. Survives across rapid keystrokes
+  // via a single shared timer.
+  const typingTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTypingRef = React.useRef(false);
+  const beaconTyping = React.useCallback(() => {
+    if (!isTypingRef.current) {
+      isTypingRef.current = true;
+      api.activity(roomId, "typing", true).catch(() => undefined);
+    }
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = setTimeout(() => {
+      isTypingRef.current = false;
+      api.activity(roomId, "typing", false).catch(() => undefined);
+    }, 3000);
+  }, [roomId]);
+  React.useEffect(() => () => {
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    if (isTypingRef.current) api.activity(roomId, "typing", false).catch(() => undefined);
+  }, [roomId]);
 
   // Auto-grow the textarea between MIN_ROWS and MAX_ROWS lines. Done
   // imperatively because Tailwind has no rows-from-content primitive — we
@@ -203,6 +269,7 @@ export function Composer({
     }
 
     setBusy(true);
+    if (file) api.activity(roomId, "uploading", true).catch(() => undefined);
     try {
       if (file) {
         const r = await api.presignUpload({
@@ -219,10 +286,21 @@ export function Composer({
           form.append("file", file);
           const up = await fetch(r.upload.url, { method: "POST", body: form });
           if (!up.ok) throw new Error(`upload failed (${up.status})`);
-          // Confirm to Glass so MediaObject.status flips pending → ready —
-          // otherwise mediaDetail keeps returning download_url:null and the
-          // attachment spins on a loading state forever.
-          await api.mediaComplete(mediaId);
+          // Decode metadata (#22 image dims; #6 audio/video duration) before
+          // confirming so the bubble reserves the right aspect and shows
+          // duration immediately.
+          let meta: Parameters<typeof api.mediaComplete>[1] = {};
+          if (file.type.startsWith("image/")) {
+            const d = await measureImage(file);
+            if (d) meta = { width: d.width, height: d.height };
+          } else if (file.type.startsWith("video/")) {
+            const d = await measureVideo(file);
+            if (d) meta = { width: d.width, height: d.height, duration_ms: d.duration_ms };
+          } else if (file.type.startsWith("audio/")) {
+            const d = await computePeaks(file);
+            if (d) meta = { duration_ms: d.duration_ms, peaks: d.peaks };
+          }
+          await api.mediaComplete(mediaId, meta);
         }
         await api.sendEvent(roomId, {
           type: file.type.startsWith("image/") ? "m.image" : "m.file",
@@ -239,6 +317,7 @@ export function Composer({
       toast.error(msg);
     } finally {
       setBusy(false);
+      api.activity(roomId, "uploading", false).catch(() => undefined);
     }
   };
 
@@ -246,6 +325,8 @@ export function Composer({
 
   const onVoiceSubmit = async (blob: Blob, durationMs: number) => {
     setRecording(false);
+    api.activity(roomId, "recording", false).catch(() => undefined);
+    api.activity(roomId, "uploading", true).catch(() => undefined);
     setBusy(true);
     try {
       const filename = `voice-${Date.now()}.webm`;
@@ -263,7 +344,13 @@ export function Composer({
         form.append("file", blob, filename);
         const up = await fetch(r.upload.url, { method: "POST", body: form });
         if (!up.ok) throw new Error(`upload failed (${up.status})`);
-        await api.mediaComplete(mediaId);
+        // #6 — Send the peaks we computed during recording (durationMs is
+        // already known; the recorder reports it).
+        const peaks = await computePeaks(blob);
+        await api.mediaComplete(mediaId, {
+          duration_ms: durationMs,
+          ...(peaks ? { peaks: peaks.peaks } : {}),
+        });
       }
       await api.sendEvent(roomId, {
         type: "m.voice",
@@ -278,6 +365,7 @@ export function Composer({
       toast.error(msg);
     } finally {
       setBusy(false);
+      api.activity(roomId, "uploading", false).catch(() => undefined);
     }
   };
 
@@ -287,7 +375,10 @@ export function Composer({
       <div className="border-t bg-background p-3">
         <VoiceRecorder
           active
-          onCancel={() => setRecording(false)}
+          onCancel={() => {
+            setRecording(false);
+            api.activity(roomId, "recording", false).catch(() => undefined);
+          }}
           onSubmit={onVoiceSubmit}
         />
       </div>
@@ -338,25 +429,98 @@ export function Composer({
         >
           <Paperclip />
         </button>
-        <textarea
-          ref={taRef}
-          autoFocus
-          value={text}
-          onChange={(e) => setText(e.target.value)}
-          placeholder="message…"
-          rows={MIN_ROWS}
-          className="min-w-0 flex-1 resize-none self-stretch bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
-          onKeyDown={(e) => {
-            if (e.key === "Enter" && !e.shiftKey) {
-              e.preventDefault();
-              send();
-            }
-          }}
-        />
+        <div className="relative flex min-w-0 flex-1 flex-col">
+          <textarea
+            ref={taRef}
+            autoFocus
+            value={text}
+            onChange={(e) => {
+              const v = e.target.value;
+              setText(v);
+              if (v) beaconTyping();
+              // Detect a `:foo` token at the caret. If found, open picker.
+              const caret = e.target.selectionStart ?? v.length;
+              const upTo = v.slice(0, caret);
+              const m = upTo.match(/:([a-z0-9_+\-]*)$/i);
+              if (m) {
+                setEmojiQuery(m[1] ?? "");
+                setEmojiIdx(0);
+              } else {
+                setEmojiQuery(null);
+              }
+            }}
+            placeholder="message…"
+            rows={MIN_ROWS}
+            className="resize-none self-stretch bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
+            onKeyDown={(e) => {
+              // Emoji picker keyboard navigation
+              if (emojiQuery !== null) {
+                const results = searchEmoji(emojiQuery);
+                if (e.key === "ArrowDown") {
+                  e.preventDefault();
+                  setEmojiIdx((i) => Math.min(i + 1, results.length - 1));
+                  return;
+                }
+                if (e.key === "ArrowUp") {
+                  e.preventDefault();
+                  setEmojiIdx((i) => Math.max(0, i - 1));
+                  return;
+                }
+                if (e.key === "Tab" || (e.key === "Enter" && results.length > 0)) {
+                  e.preventDefault();
+                  const picked = results[emojiIdx] ?? results[0];
+                  if (picked) {
+                    const caret = taRef.current?.selectionStart ?? text.length;
+                    const before = text.slice(0, caret);
+                    const after = text.slice(caret);
+                    const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, picked.emoji);
+                    const nextText = replaced + after;
+                    setText(nextText);
+                    setEmojiQuery(null);
+                    queueMicrotask(() => {
+                      const el = taRef.current;
+                      if (!el) return;
+                      const pos = replaced.length;
+                      el.selectionStart = el.selectionEnd = pos;
+                    });
+                  }
+                  return;
+                }
+                if (e.key === "Escape") {
+                  e.preventDefault();
+                  setEmojiQuery(null);
+                  return;
+                }
+              }
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                send();
+              }
+            }}
+          />
+          {emojiQuery !== null && (
+            <EmojiQuickPicker
+              query={emojiQuery}
+              selectedIndex={emojiIdx}
+              onPick={(em) => {
+                const caret = taRef.current?.selectionStart ?? text.length;
+                const before = text.slice(0, caret);
+                const after = text.slice(caret);
+                const replaced = before.replace(/:([a-z0-9_+\-]*)$/i, em);
+                setText(replaced + after);
+                setEmojiQuery(null);
+                queueMicrotask(() => taRef.current?.focus());
+              }}
+            />
+          )}
+        </div>
         {!text.trim() && !file ? (
           <button
             type="button"
-            onClick={() => setRecording(true)}
+            onClick={() => {
+              setRecording(true);
+              api.activity(roomId, "recording", true).catch(() => undefined);
+            }}
             disabled={busy}
             title="record voice message"
             aria-label="record voice message"

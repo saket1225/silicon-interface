@@ -24,14 +24,27 @@ export interface RoomDisplay {
  * derived from the member kinds) and a subtitle that summarizes membership.
  */
 export function roomDisplay(room: Room): RoomDisplay {
-  if (room.kind === "direct" && room.peers.length > 0) {
-    const peer = room.peers[0];
+  if (room.kind === "direct") {
+    if (room.peers.length > 0) {
+      const peer = room.peers[0];
+      return {
+        name: peer.name?.trim() || peer.handle,
+        handle: peer.handle,
+        photoUrl: peer.profile_photo_url,
+        peer,
+        subtitle: peer.kind === "silicon" ? "Silicon" : "Carbon",
+      };
+    }
+    // Direct room with no peer projection yet — the Glass response is in
+    // flight or the room was just created. Show a neutral placeholder
+    // instead of room.name (which often defaults to the *creator's* handle,
+    // i.e. "me"). #3
     return {
-      name: peer.name?.trim() || peer.handle,
-      handle: peer.handle,
-      photoUrl: peer.profile_photo_url,
-      peer,
-      subtitle: peer.kind === "silicon" ? "Silicon" : "Carbon",
+      name: "new chat",
+      handle: room.room_id,
+      photoUrl: null,
+      peer: null,
+      subtitle: "say hi to get started",
     };
   }
   const groupName = room.name?.trim() || room.topic?.trim() || "group";

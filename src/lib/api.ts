@@ -298,6 +298,16 @@ export const api = {
 
   typing: (room_id: string, is_typing = true) =>
     call<{ ok: boolean }>("POST", `/api/v1/rooms/${room_id}/typing`, { is_typing }),
+  /** Generic activity beacon: typing | uploading | recording. */
+  activity: (
+    room_id: string,
+    state: "typing" | "uploading" | "recording",
+    active = true,
+  ) =>
+    call<{ ok: boolean }>("POST", `/api/v1/rooms/${room_id}/activity`, {
+      state,
+      active,
+    }),
 
   postProgress: (
     room_id: string,
@@ -380,9 +390,16 @@ export const api = {
    * Confirm an S3 upload completed. Flips MediaObject.status from "pending"
    * to "ready" so subsequent /media/<id> returns a download_url instead of
    * the loading placeholder. Idempotent.
+   *
+   * Optional metadata (image width/height, audio duration + waveform peaks)
+   * is backfilled into the MediaObject so subsequent renders can reserve
+   * the right aspect and show the bars before audio finishes downloading.
    */
-  mediaComplete: (media_id: string) =>
-    call<MediaObject>("POST", `/api/v1/media/${media_id}/complete`, {}),
+  mediaComplete: (
+    media_id: string,
+    meta?: { width?: number; height?: number; duration_ms?: number; peaks?: number[] },
+  ) =>
+    call<MediaObject>("POST", `/api/v1/media/${media_id}/complete`, meta ?? {}),
 
   // -------- voice --------
   tts: (data: { text: string; voice?: string; scene?: string; style?: string; room_id?: string }) =>

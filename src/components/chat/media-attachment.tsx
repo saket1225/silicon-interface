@@ -14,6 +14,7 @@ import type { MediaObject } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 import { MediaPreviewer, downloadAsset } from "./media-previewer";
+import { SiliconAudio } from "./silicon-audio";
 
 /**
  * Renders an attachment inline (image/video/audio thumbnail / PDF chip / file
@@ -68,14 +69,32 @@ export function MediaAttachment({
   if (failed) return <span className="text-xs text-destructive">attachment unavailable</span>;
   if (!url) {
     if (probablyVisual) {
+      // #22 — Reserve the *exact* aspect from media.width/height so loading
+      // never reflows the bubble.
+      const aspect =
+        media?.width && media?.height && media.width > 0 && media.height > 0
+          ? `${media.width} / ${media.height}`
+          : "4 / 3";
       return (
         <div
           className="flex w-72 max-w-full items-center justify-center border bg-card"
-          style={{ aspectRatio: "4 / 3" }}
+          style={{ aspectRatio: aspect }}
           aria-busy="true"
         >
           <CircleNotch className="h-4 w-4 animate-spin opacity-40" />
         </div>
+      );
+    }
+    // Audio loading state — render the Silicon waveform placeholder so the
+    // bars + timer exist before bytes arrive.
+    if ((mime || "").toLowerCase().startsWith("audio/")) {
+      return (
+        <SiliconAudio
+          url={null}
+          peaks={media?.peaks ?? null}
+          durationMs={media?.duration_ms ?? null}
+          className="min-w-0 flex-1"
+        />
       );
     }
     return (
@@ -89,14 +108,20 @@ export function MediaAttachment({
   const filename = caption?.trim() || media?.kind || "file";
 
   // Image — clickable thumbnail in a fixed-aspect frame so the bubble
-  // doesn't reflow when the actual pixels arrive over the network.
+  // doesn't reflow when the actual pixels arrive over the network. When the
+  // server knows the real dimensions (#22), we use the actual aspect ratio
+  // instead of the 4/3 fallback — zero layout shift.
   if (isImage && !isDev) {
+    const imgAspect =
+      media?.width && media?.height && media.width > 0 && media.height > 0
+        ? `${media.width} / ${media.height}`
+        : "4 / 3";
     return (
       <>
         <figure className="space-y-1">
           <div
             className="group relative w-72 max-w-full border bg-card"
-            style={{ aspectRatio: "4 / 3" }}
+            style={{ aspectRatio: imgAspect }}
           >
             <button
               type="button"
@@ -127,13 +152,18 @@ export function MediaAttachment({
   }
 
   // Video — same fixed-aspect-frame treatment so loading doesn't shift the
-  // bubble; the inline player handles its own controls.
+  // bubble; the inline player handles its own controls. Real dims (#22)
+  // override the 16/9 fallback.
   if (isVideo && !isDev) {
+    const vidAspect =
+      media?.width && media?.height && media.width > 0 && media.height > 0
+        ? `${media.width} / ${media.height}`
+        : "16 / 9";
     return (
       <>
         <div
           className="group relative w-72 max-w-full border bg-card"
-          style={{ aspectRatio: "16 / 9" }}
+          style={{ aspectRatio: vidAspect }}
         >
           <video
             src={url}
@@ -160,12 +190,17 @@ export function MediaAttachment({
     );
   }
 
-  // Audio — inline player with download next to it. No previewer (modal
-  // doesn't help audio).
+  // Audio — Silicon-style waveform player. Uses server-computed peaks +
+  // duration so the bars + timer render before the audio bytes download.
   if (isAudio && !isDev) {
     return (
       <div className="flex w-full items-center gap-2">
-        <audio src={url} controls className="min-w-0 flex-1" />
+        <SiliconAudio
+          url={url}
+          peaks={media?.peaks ?? null}
+          durationMs={media?.duration_ms ?? null}
+          className="min-w-0 flex-1"
+        />
         <IconChip onClick={() => downloadAsset(url, filename)} label="download">
           <DownloadSimple />
         </IconChip>

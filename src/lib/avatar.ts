@@ -1,10 +1,13 @@
-import { toSvg } from "jdenticon";
-
 import { api } from "./api";
+import { glyphSvg } from "./glyph";
 
-/** Deterministic jdenticon SVG markup for a handle (used for inline rendering). */
+/**
+ * Deterministic Silicon glyph for a handle. Direct port of GlyphGenerator
+ * (radial 7×7 grid of triangles/full/empty cells, character-by-character
+ * progressive growth). Same handle always produces the same mark.
+ */
 export function identiconSvg(seed: string, size = 256): string {
-  return toSvg(seed, size);
+  return glyphSvg(seed || "?", { size });
 }
 
 /**

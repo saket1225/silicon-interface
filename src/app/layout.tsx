@@ -26,7 +26,11 @@ export default function RootLayout({
       lang="en"
       className={`${tiktokSans.variable} ${jetbrainsMono.variable} h-full antialiased`}
     >
-      <body className="min-h-full flex flex-col bg-background text-foreground">
+      {/* h-full + flex column lets the chat layout (which uses h-screen
+          overflow-hidden) clamp itself to viewport; min-h-full is kept on the
+          other auth/landing pages by virtue of their own min-h-screen flex
+          containers, which still render correctly inside an h-full body. */}
+      <body className="flex h-full flex-col bg-background text-foreground">
         {children}
         {/* Sonner — brand-themed. richColors would override our palette, so
             we drop it and supply colored swatches via toastOptions classes.
