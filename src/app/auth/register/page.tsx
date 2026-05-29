@@ -220,6 +220,12 @@ function RegisterPageInner() {
           "silicon-interface:onboarding-flow",
           flowId,
         );
+        // Carry the verified email through so onboarding can pre-fill the
+        // Carbon ID suggestion (local-part, normalised).
+        window.sessionStorage.setItem(
+          "silicon-interface:onboarding-email",
+          email.trim(),
+        );
         router.replace("/onboarding");
       }
     });
@@ -456,10 +462,11 @@ function Stepper({
   emailVerified: boolean;
   phoneVerified: boolean;
 }) {
+  // Carbon ID is picked during the personalized onboarding flow (post-phone-
+  // verify), so register only surfaces the two verification steps here.
   const items: { id: Step; label: string; done: boolean }[] = [
     { id: "email", label: "email", done: emailVerified },
     { id: "phone", label: "phone", done: phoneVerified },
-    { id: "carbonid", label: "carbon id", done: false },
   ];
   return (
     <ol className="flex items-center gap-2 text-xs">

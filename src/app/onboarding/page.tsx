@@ -2,29 +2,27 @@
 
 import * as React from "react";
 import { useRouter } from "next/navigation";
+import { UploadSimple } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
 import { generateAndStoreAvatar } from "@/lib/avatar";
+import { suggestCarbonId } from "@/lib/email";
 
 import { Logo } from "@/components/logo";
 import { IdAvatar } from "@/components/profile/id-avatar";
 import { Button } from "@/components/ui/button";
 
-// localStorage key the register page drops the flowId into before redirecting
-// here. We pull it on mount and use it to finalize via api.registerUsername.
 const FLOW_KEY = "silicon-interface:onboarding-flow";
+const EMAIL_KEY = "silicon-interface:onboarding-email";
 const CARBON_ID_RE = /^[a-z0-9_.-]{3,32}$/;
 const TYPE_DELAY_MS = 28;
 
 interface Screen {
   text: (ctx: { carbonId: string; name: string }) => string;
-  /** If true, the screen renders the Carbon ID input under the typewriter. */
   pickCarbonId?: boolean;
-  /** If true, the screen renders the live profile preview card. */
   preview?: boolean;
-  /** Custom continue button label. */
   cta?: string;
 }
 
@@ -35,7 +33,7 @@ const SCREENS: Screen[] = [
   },
   {
     text: () =>
-      "Well some context, Carbon is well you all the human elements. And Silicon… well you will know once you talk to one 😉 Let's get you started…",
+      "Before we begin, some context:\nCarbon is… You; all the human elements in the play. And Silicon… well you will know once you talk to one. Let's get you started…",
   },
   {
     text: () =>
@@ -54,9 +52,6 @@ const SCREENS: Screen[] = [
   },
 ];
 
-/** Strip every non-name char (digits, dashes, underscores, dots) and Title-
- *  Case the result. "saket-dev_12" → "Saketdev". Used to seed the editable
- *  display name from the Carbon ID. */
 function nameFromCarbonId(cid: string): string {
   if (!cid) return "";
   const cleaned = cid.replace(/[^a-zA-Z]/g, "");
@@ -75,22 +70,27 @@ export default function OnboardingPage() {
 function OnboardingInner() {
   const router = useRouter();
   const [flowId, setFlowId] = React.useState<string | null>(null);
+  const [emailHint, setEmailHint] = React.useState<string>("");
   const [step, setStep] = React.useState(0);
   const [carbonId, setCarbonId] = React.useState("");
   const [name, setName] = React.useState("");
   const [bio, setBio] = React.useState("");
-  // Whether the user has manually typed a name. If false, we keep auto-
-  // syncing it from the carbon_id.
   const [nameDirty, setNameDirty] = React.useState(false);
+  // Step 4 — locally-staged profile photo (uploaded after finalize since
+  // presign needs an auth session).
+  const [photoFile, setPhotoFile] = React.useState<File | null>(null);
+  const [photoPreview, setPhotoPreview] = React.useState<string | null>(null);
+  const photoInputRef = React.useRef<HTMLInputElement>(null);
+
   const [revealed, setRevealed] = React.useState("");
   const [typingDone, setTypingDone] = React.useState(false);
   const [finalizing, setFinalizing] = React.useState(false);
-  // Availability check for step 2.
   const [avail, setAvail] = React.useState<{
     for: string; ok: boolean; reason: string;
   } | null>(null);
 
-  // Pull flowId once on mount. If absent, kick back to register.
+  // Pull flowId + the email hint once on mount. If flowId is missing, kick
+  // back to register; if email is present, pre-seed carbon ID + name.
   React.useEffect(() => {
     const f = window.sessionStorage.getItem(FLOW_KEY);
     if (!f) {
@@ -98,6 +98,12 @@ function OnboardingInner() {
       return;
     }
     setFlowId(f);
+    const e = window.sessionStorage.getItem(EMAIL_KEY) ?? "";
+    setEmailHint(e);
+    if (e) {
+      const suggested = suggestCarbonId(e);
+      setCarbonId(suggested);
+    }
   }, [router]);
 
   const screen = SCREENS[step];
@@ -106,8 +112,6 @@ function OnboardingInner() {
     [screen, carbonId, name],
   );
 
-  // Typewriter for the current screen. Restarts whenever `target` (and thus
-  // the step) changes.
   React.useEffect(() => {
     setRevealed("");
     setTypingDone(false);
@@ -123,12 +127,10 @@ function OnboardingInner() {
     return () => window.clearInterval(id);
   }, [target]);
 
-  // Auto-sync name from Carbon ID until the user edits it.
   React.useEffect(() => {
     if (!nameDirty) setName(nameFromCarbonId(carbonId));
   }, [carbonId, nameDirty]);
 
-  // Debounced availability check.
   const cid = carbonId.trim().toLowerCase();
   const formatValid = CARBON_ID_RE.test(cid);
   React.useEffect(() => {
@@ -144,35 +146,73 @@ function OnboardingInner() {
     return () => clearTimeout(t);
   }, [cid, formatValid]);
 
-  const carbonIdReady =
-    formatValid && avail?.for === cid && avail.ok;
+  const carbonIdReady = formatValid && avail?.for === cid && avail.ok;
 
   const skipTyping = () => {
     setRevealed(target);
     setTypingDone(true);
   };
 
-  const next = async () => {
+  // Photo handlers
+  const onPhotoPick = (f: File | null) => {
+    if (!f || !f.type.startsWith("image/")) return;
+    setPhotoFile(f);
+    // Cheap inline preview using object URL.
+    if (photoPreview) URL.revokeObjectURL(photoPreview);
+    setPhotoPreview(URL.createObjectURL(f));
+  };
+  React.useEffect(() => {
+    return () => {
+      if (photoPreview) URL.revokeObjectURL(photoPreview);
+    };
+    // Cleanup on unmount only; we already revoke when swapping above.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const next = React.useCallback(async () => {
     if (step === 2 && !carbonIdReady) return;
     if (step === 3) {
       if (!flowId) return;
       setFinalizing(true);
       try {
-        const session = await api.registerUsername(
-          flowId,
-          cid,
-        );
+        const session = await api.registerUsername(flowId, cid);
         authStore.setSession(session);
-        // Patch the optional name + bio.
+        // Apply name + bio in the background; failures are non-fatal.
         if (name && name !== session.carbon.name) {
           await api.patchMe({ name }).catch(() => undefined);
         }
         if (bio) {
           await api.patchMe({ tagline: bio }).catch(() => undefined);
         }
-        // Generate + persist the glyph avatar in the background — never blocks.
-        void generateAndStoreAvatar(session.carbon.carbon_id);
+        // If the user uploaded a custom photo on the preview screen, push
+        // it through the same presign + complete + patchMe flow used by
+        // /settings. Otherwise mint the deterministic glyph.
+        if (photoFile) {
+          try {
+            const r = await api.presignUpload({
+              mime: photoFile.type || "image/png",
+              size: photoFile.size,
+              kind: "profile_icon",
+              filename: photoFile.name,
+            });
+            if (!r.upload.dev_mode) {
+              const form = new FormData();
+              for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
+              form.append("file", photoFile);
+              const up = await fetch(r.upload.url, { method: r.upload.method || "POST", body: form });
+              if (up.ok) await api.mediaComplete(r.media.media_id);
+            }
+            const key =
+              (r.upload.fields as Record<string, string>).key || r.media.media_id;
+            await api.patchMe({ profile_photo_key: key }).catch(() => undefined);
+          } catch {
+            // photo upload failure shouldn't block onboarding completion
+          }
+        } else {
+          void generateAndStoreAvatar(session.carbon.carbon_id);
+        }
         window.sessionStorage.removeItem(FLOW_KEY);
+        window.sessionStorage.removeItem(EMAIL_KEY);
         setStep((s) => s + 1);
       } catch (e) {
         toast.error(e instanceof ApiError ? e.message : String(e));
@@ -186,19 +226,39 @@ function OnboardingInner() {
       return;
     }
     setStep((s) => s + 1);
-  };
+  }, [step, carbonIdReady, flowId, cid, name, bio, photoFile, router]);
+
+  // Pressing Enter advances when the screen is ready to advance.
+  React.useEffect(() => {
+    const handler = (e: KeyboardEvent) => {
+      if (e.key !== "Enter") return;
+      if (!typingDone) return;
+      // For the Carbon-ID step, Enter is only meaningful when the field is
+      // valid + available.
+      if (step === 2 && !carbonIdReady) return;
+      // Allow Enter inside textarea / multi-line surfaces to insert newlines.
+      const target = e.target as HTMLElement | null;
+      if (target?.tagName === "TEXTAREA") return;
+      e.preventDefault();
+      void next();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [typingDone, step, carbonIdReady, next]);
+
+  // Smooth, opacity-only entrance for the contextual widgets so they don't
+  // pop in and shove the CTA down.
+  const fadeIn = "animate-[onb-fade-in_0.45s_ease-out_both]";
+
+  const progressPct = ((step + 1) / SCREENS.length) * 100;
 
   return (
-    <div className="bg-dots flex min-h-screen flex-col">
+    <div className="bg-dots relative flex min-h-screen flex-col">
       <header className="px-6 pt-6">
         <Logo size={26} withWordmark />
       </header>
       <section className="flex flex-1 flex-col items-center justify-center px-6 py-10">
-        <div className="w-full max-w-lg space-y-8">
-          <div className="label-mono text-[10px] text-muted-foreground">
-            step {step + 1} of {SCREENS.length}
-          </div>
-
+        <div className="w-full max-w-lg space-y-7">
           <div
             onClick={skipTyping}
             className="min-h-[140px] cursor-text whitespace-pre-wrap text-lg leading-relaxed"
@@ -210,9 +270,9 @@ function OnboardingInner() {
             )}
           </div>
 
-          {/* Step 2 — pick Carbon ID */}
+          {/* Carbon ID picker */}
           {screen.pickCarbonId && typingDone && (
-            <div className="space-y-2">
+            <div key={`pick-${step}`} className={`space-y-2 ${fadeIn}`}>
               <div className="flex items-center border border-input bg-transparent transition-colors focus-within:border-ring">
                 <span className="pl-3 text-2xl text-muted-foreground">@</span>
                 <input
@@ -236,14 +296,46 @@ function OnboardingInner() {
               </div>
               <p className="text-xs text-muted-foreground">
                 Lowercase letters, digits, _ . - · 3 to 32 characters · permanent
+                {emailHint ? ` · suggested from ${emailHint}` : ""}
               </p>
             </div>
           )}
 
-          {/* Step 3 — profile preview */}
+          {/* Profile preview + optional photo upload (Carbon ID intentionally
+              not shown here — they just picked it on the previous screen). */}
           {screen.preview && typingDone && (
-            <div className="flex flex-col items-center gap-4 border bg-card p-6">
-              <IdAvatar seed={carbonId || "?"} src={null} size={132} />
+            <div
+              key={`preview-${step}`}
+              className={`flex flex-col items-center gap-4 border bg-card p-6 ${fadeIn}`}
+            >
+              <div className="relative">
+                {photoPreview ? (
+                  // eslint-disable-next-line @next/next/no-img-element -- local object URL
+                  <img
+                    src={photoPreview}
+                    alt="your photo"
+                    className="h-32 w-32 border object-cover"
+                  />
+                ) : (
+                  <IdAvatar seed={carbonId || "?"} src={null} size={132} />
+                )}
+                <input
+                  ref={photoInputRef}
+                  type="file"
+                  accept="image/*"
+                  className="hidden"
+                  onChange={(e) => onPhotoPick(e.target.files?.[0] ?? null)}
+                />
+                <button
+                  type="button"
+                  onClick={() => photoInputRef.current?.click()}
+                  className="absolute -bottom-2 -right-2 inline-flex h-9 w-9 items-center justify-center border bg-foreground text-background transition-opacity hover:opacity-90"
+                  title="upload a photo"
+                  aria-label="upload a photo"
+                >
+                  <UploadSimple className="h-4 w-4" />
+                </button>
+              </div>
               <div className="w-full space-y-3">
                 <div className="space-y-1">
                   <label className="label-mono text-[10px] text-muted-foreground">
@@ -271,33 +363,61 @@ function OnboardingInner() {
                     className="w-full border border-input bg-transparent px-3 py-2 text-sm outline-none transition-colors focus:border-ring"
                   />
                 </div>
-                <div className="space-y-1">
-                  <label className="label-mono text-[10px] text-muted-foreground">
-                    carbon id
-                  </label>
-                  <div className="font-mono text-xs text-muted-foreground">
-                    {carbonId}
-                  </div>
-                </div>
               </div>
             </div>
           )}
 
+          {/* CTA — chunkier vertical padding, with an (↵) hint so users know
+              Enter advances too. */}
           {typingDone && (
-            <Button
-              onClick={next}
-              disabled={
-                (step === 2 && !carbonIdReady) || finalizing || (step === 3 && !flowId)
-              }
-              className="w-full"
-            >
-              {finalizing
-                ? "setting up your account…"
-                : (screen.cta ?? "Continue")}
-            </Button>
+            <div className={fadeIn} key={`cta-${step}`}>
+              <Button
+                onClick={() => void next()}
+                disabled={
+                  (step === 2 && !carbonIdReady) ||
+                  finalizing ||
+                  (step === 3 && !flowId)
+                }
+                className="h-14 w-full text-base"
+              >
+                {finalizing ? (
+                  "setting up your account…"
+                ) : (
+                  <>
+                    {screen.cta ?? "Continue"}
+                    <span className="ml-2 label-mono text-[10px] opacity-70">
+                      (↵)
+                    </span>
+                  </>
+                )}
+              </Button>
+            </div>
           )}
         </div>
       </section>
+
+      {/* Bottom progress bar — fills as we advance, 10px tall. */}
+      <div className="absolute inset-x-0 bottom-0 h-[10px] bg-foreground/10">
+        <div
+          className="h-full bg-foreground transition-[width] duration-500 ease-out"
+          style={{ width: `${progressPct}%` }}
+        />
+      </div>
+
+      {/* Keyframes for the contextual fade-in. Local to keep onboarding self-
+          contained instead of polluting globals.css. */}
+      <style jsx global>{`
+        @keyframes onb-fade-in {
+          from {
+            opacity: 0;
+            transform: translateY(6px);
+          }
+          to {
+            opacity: 1;
+            transform: translateY(0);
+          }
+        }
+      `}</style>
     </div>
   );
 }
