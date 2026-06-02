@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
+import { track } from "@/lib/analytics";
 import { useResendCooldown } from "@/lib/use-resend";
 import { findCountry, guessCountryIso2, parseE164, type Country } from "@/lib/country-codes";
 import { isValidEmail, looksLikeWorkEmail, suggestCarbonId } from "@/lib/email";
@@ -242,6 +243,7 @@ function RegisterPageInner() {
     wrap(async () => {
       const session = await api.registerUsername(flowId, carbonId.trim().toLowerCase());
       authStore.setSession(session);
+      track.signedUp({ method: "register" });
       // Generate + store the new Carbon's avatar; never block entry on it.
       await generateAndStoreAvatar(session.carbon.carbon_id);
       toast.success(`welcome, @${session.carbon.username}`);

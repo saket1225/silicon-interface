@@ -8,6 +8,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
+import { track } from "@/lib/analytics";
 import { useResendCooldown } from "@/lib/use-resend";
 import { findCountry, guessCountryIso2, parseE164, type Country } from "@/lib/country-codes";
 import type { LoginChannel, LoginChannelOption } from "@/lib/types";
@@ -126,6 +127,7 @@ function LoginPageInner() {
       authStore.setTokens(r.access, r.refresh);
       const me = await api.me();
       authStore.setCarbon(me);
+      track.loggedIn({ method: "otp" });
       toast.success(`welcome back, @${me.username}`);
       router.replace("/chat");
     });

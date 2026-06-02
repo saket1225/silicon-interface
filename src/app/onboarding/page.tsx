@@ -7,6 +7,7 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
+import { track } from "@/lib/analytics";
 import { generateAndStoreAvatar } from "@/lib/avatar";
 import { suggestCarbonId } from "@/lib/email";
 
@@ -177,6 +178,7 @@ function OnboardingInner() {
       try {
         const session = await api.registerUsername(flowId, cid);
         authStore.setSession(session);
+        track.signedUp({ method: "onboarding" });
         // Apply name + bio in the background; failures are non-fatal.
         if (name && name !== session.carbon.name) {
           await api.patchMe({ name }).catch(() => undefined);

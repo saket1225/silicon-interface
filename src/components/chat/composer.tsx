@@ -14,6 +14,7 @@ import {
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
+import { track } from "@/lib/analytics";
 import { searchEmoji } from "@/lib/emoji";
 import { computePeaks, measureImage, measureVideo } from "@/lib/media-meta";
 import type { Event, EventType } from "@/lib/types";
@@ -454,6 +455,11 @@ export function Composer({
       .sendEvent(roomId, payload)
       .then((real) => onAck(clientId, real))
       .catch((err) => onFail(clientId, err));
+    track.messageSent({
+      room_id: roomId,
+      message_type: "m.text",
+      is_reply: Boolean(replyTo),
+    });
     // Clear the reply target on send.
     onClearReply?.();
   };
@@ -468,10 +474,12 @@ export function Composer({
       if (uploadStatus !== "ready" || !up) return;
       setBusy(true);
       try {
+        const fileType = up.mime.startsWith("image/") ? "m.image" : "m.file";
         await api.sendEvent(roomId, {
-          type: up.mime.startsWith("image/") ? "m.image" : "m.file",
+          type: fileType,
           content: { media_id: up.mediaId, mime: up.mime, caption: body || file.name },
         });
+        track.messageSent({ room_id: roomId, message_type: fileType, has_attachment: true });
         reset();
       } catch (e) {
         toast.error(e instanceof ApiError ? e.message : String(e));
@@ -532,6 +540,7 @@ export function Composer({
         },
       });
       onAck(clientId, real);
+      track.messageSent({ room_id: roomId, message_type: "m.voice", has_attachment: true });
     } catch (e) {
       onFail(clientId, e);
     } finally {

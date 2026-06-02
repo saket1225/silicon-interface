@@ -2,6 +2,7 @@
 
 import * as React from "react";
 
+import { identifyCarbon, resetAnalytics } from "./analytics";
 import type { AuthSession, Carbon } from "./types";
 
 const ACCESS_KEY = "silicon-interface:access";
@@ -62,16 +63,22 @@ export const authStore = {
     safeSet(ACCESS_KEY, session.access);
     safeSet(REFRESH_KEY, session.refresh);
     safeSet(CARBON_KEY, JSON.stringify(session.carbon));
+    identifyCarbon(session.carbon);
     emit();
   },
   setTokens(access: string, refresh: string, carbon?: Carbon) {
     safeSet(ACCESS_KEY, access);
     safeSet(REFRESH_KEY, refresh);
-    if (carbon) safeSet(CARBON_KEY, JSON.stringify(carbon));
+    if (carbon) {
+      safeSet(CARBON_KEY, JSON.stringify(carbon));
+      identifyCarbon(carbon);
+    }
     emit();
   },
   setCarbon(carbon: Carbon) {
     safeSet(CARBON_KEY, JSON.stringify(carbon));
+    // Keep PostHog person properties fresh (login, profile edits, tz sync).
+    identifyCarbon(carbon);
     emit();
   },
   setSiliconKey(key: string | null) {
@@ -83,6 +90,7 @@ export const authStore = {
     safeSet(REFRESH_KEY, null);
     safeSet(CARBON_KEY, null);
     safeSet(SILICON_KEY, null);
+    resetAnalytics();
     emit();
   },
   subscribe(fn: Listener): () => void {

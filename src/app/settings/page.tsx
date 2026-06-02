@@ -6,6 +6,7 @@ import { SignOut } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { authStore } from "@/lib/auth";
+import { track } from "@/lib/analytics";
 
 import { Button } from "@/components/ui/button";
 import { ProfileEditor } from "@/components/profile/profile-editor";
@@ -14,6 +15,7 @@ export default function SettingsPage() {
   const router = useRouter();
 
   const logout = () => {
+    track.loggedOut();
     authStore.clear();
     toast.success("logged out");
     router.replace("/auth/login");
