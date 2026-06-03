@@ -84,12 +84,16 @@ interface Props {
   onAck: (clientId: string, real: Event) => void;
   /** POST failed — mark the optimistic placeholder as failed. */
   onFail: (clientId: string, error: unknown) => void;
+  /** Update a local pending bubble before the server has acked it. */
+  onOptimisticUpdate?: (clientId: string, payload: OptimisticPayload) => void;
   /** A file dropped onto the chat surface gets handed in here. */
   droppedFile?: File | null;
   onDroppedFileConsumed?: () => void;
   /** When set, the next send will carry reply_to_event_id. */
   replyTo?: Event | null;
   onClearReply?: () => void;
+  /** Delay text sends in direct silicon chats so nearby follow-ups can merge. */
+  delayTextForSilicon?: boolean;
 }
 
 // Composer height bounds, in line-heights. Single line by default, expands
@@ -101,6 +105,14 @@ const MAX_ROWS = 12;
 // cell, ↑/↓ move a whole row (EMOJI_COLS cells).
 const EMOJI_COLS = 8;
 const EMOJI_LIMIT = EMOJI_COLS * 4; // 4 rows
+const SILICON_TEXT_SEND_DELAY_MS = 5000;
+const CONTINUING_DRAFT_MIN_CHARS = 3;
+
+interface QueuedTextSend {
+  clientId: string;
+  body: string;
+  replyToEventId?: string;
+}
 
 /**
  * Renders the file the user has queued to send. Images get a real thumbnail
@@ -246,10 +258,12 @@ export function Composer({
   onOptimisticAdd,
   onAck,
   onFail,
+  onOptimisticUpdate,
   droppedFile,
   onDroppedFileConsumed,
   replyTo,
   onClearReply,
+  delayTextForSilicon = false,
 }: Props) {
   const [text, setText] = React.useState("");
   const [file, setFile] = React.useState<File | null>(null);
@@ -267,6 +281,22 @@ export function Composer({
   const uploadedRef = React.useRef<{ mediaId: string; mime: string } | null>(null);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const taRef = React.useRef<HTMLTextAreaElement>(null);
+  const textRef = React.useRef(text);
+  const delayedTextQueueRef = React.useRef<QueuedTextSend[]>([]);
+  const delayTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [typingActive, setTypingActiveState] = React.useState(false);
+  const typingActiveRef = React.useRef(false);
+  const [queuePaused, setQueuePaused] = React.useState(false);
+  const [queuedTextCount, setQueuedTextCount] = React.useState(0);
+
+  React.useEffect(() => {
+    textRef.current = text;
+  }, [text]);
+
+  const setTypingActive = React.useCallback((active: boolean) => {
+    typingActiveRef.current = active;
+    setTypingActiveState(active);
+  }, []);
 
   // Abort the in-flight upload and discard the staged file.
   const cancelUpload = () => {
@@ -400,14 +430,16 @@ export function Composer({
   const beaconTyping = React.useCallback(() => {
     if (!isTypingRef.current) {
       isTypingRef.current = true;
+      setTypingActive(true);
       api.activity(roomId, "typing", true).catch(() => undefined);
     }
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     typingTimerRef.current = setTimeout(() => {
       isTypingRef.current = false;
+      setTypingActive(false);
       api.activity(roomId, "typing", false).catch(() => undefined);
     }, 3000);
-  }, [roomId]);
+  }, [roomId, setTypingActive]);
   React.useEffect(() => () => {
     if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
     if (isTypingRef.current) {
@@ -415,9 +447,10 @@ export function Composer({
       // the next room never re-sends a "typing" beacon (so the other side
       // never sees the indicator).
       isTypingRef.current = false;
+      setTypingActive(false);
       api.activity(roomId, "typing", false).catch(() => undefined);
     }
-  }, [roomId]);
+  }, [roomId, setTypingActive]);
 
   // Auto-grow the textarea between MIN_ROWS and MAX_ROWS lines. Done
   // imperatively because Tailwind has no rows-from-content primitive — we
@@ -442,6 +475,121 @@ export function Composer({
     persistDraft("");
     setFile(null);
   };
+
+  const clearDelayTimer = React.useCallback(() => {
+    if (delayTimerRef.current) {
+      clearTimeout(delayTimerRef.current);
+      delayTimerRef.current = null;
+    }
+  }, []);
+
+  const hasContinuingDraft = React.useCallback(
+    () =>
+      typingActiveRef.current &&
+      textRef.current.trim().length >= CONTINUING_DRAFT_MIN_CHARS,
+    [],
+  );
+
+  const buildQueuedPayload = React.useCallback((items: QueuedTextSend[]): OptimisticPayload => {
+    const replyIds = new Set(items.map((item) => item.replyToEventId || ""));
+    const sharedReplyId = replyIds.size === 1 ? items[0]?.replyToEventId : undefined;
+    return {
+      type: "m.text",
+      content: { body: items.map((item) => item.body).join("\n\n") },
+      reply_to_event_id: sharedReplyId,
+    };
+  }, []);
+
+  const clearDelayedQueue = React.useCallback(() => {
+    delayedTextQueueRef.current = [];
+    setQueuedTextCount(0);
+    setQueuePaused(false);
+    clearDelayTimer();
+  }, [clearDelayTimer]);
+
+  const flushDelayedTextQueue = React.useCallback(
+    async (extra?: QueuedTextSend, optimistic = true) => {
+      const items = [
+        ...delayedTextQueueRef.current,
+        ...(extra ? [extra] : []),
+      ];
+      if (!items.length) return;
+      const payload = buildQueuedPayload(items);
+      const ackClientId = delayedTextQueueRef.current[0]?.clientId;
+      clearDelayedQueue();
+      if (ackClientId) onOptimisticUpdate?.(ackClientId, payload);
+      try {
+        const real = await api.sendEvent(roomId, payload);
+        if (optimistic && ackClientId) onAck(ackClientId, real);
+        track.messageSent({
+          room_id: roomId,
+          message_type: "m.text",
+          is_reply: Boolean(payload.reply_to_event_id),
+        });
+      } catch (err) {
+        if (optimistic && ackClientId) onFail(ackClientId, err);
+        else toast.error(err instanceof ApiError ? err.message : String(err));
+      }
+    },
+    [
+      buildQueuedPayload,
+      clearDelayedQueue,
+      onAck,
+      onFail,
+      onOptimisticUpdate,
+      roomId,
+    ],
+  );
+
+  const queueDelayedTextSend = React.useCallback(
+    (body: string) => {
+      const clientId = newClientId();
+      const item: QueuedTextSend = {
+        clientId,
+        body,
+        replyToEventId: replyTo?.event_id,
+      };
+      delayedTextQueueRef.current = [item];
+      setQueuedTextCount(1);
+      setQueuePaused(false);
+      onOptimisticAdd(clientId, buildQueuedPayload([item]));
+      clearDelayTimer();
+      delayTimerRef.current = setTimeout(() => {
+        delayTimerRef.current = null;
+        if (hasContinuingDraft()) setQueuePaused(true);
+        else void flushDelayedTextQueue();
+      }, SILICON_TEXT_SEND_DELAY_MS);
+      onClearReply?.();
+    },
+    [
+      buildQueuedPayload,
+      clearDelayTimer,
+      flushDelayedTextQueue,
+      hasContinuingDraft,
+      onClearReply,
+      onOptimisticAdd,
+      replyTo,
+    ],
+  );
+
+  React.useEffect(() => {
+    if (!queuePaused || queuedTextCount === 0) return;
+    if (!hasContinuingDraft()) void flushDelayedTextQueue();
+  }, [flushDelayedTextQueue, hasContinuingDraft, queuePaused, queuedTextCount, text, typingActive]);
+
+  React.useEffect(
+    () => () => {
+      const queued = delayedTextQueueRef.current;
+      if (!queued.length) return;
+      clearDelayTimer();
+      const payload = buildQueuedPayload(queued);
+      delayedTextQueueRef.current = [];
+      api.sendEvent(roomId, payload).catch((err) => {
+        toast.error(err instanceof ApiError ? err.message : String(err));
+      });
+    },
+    [buildQueuedPayload, clearDelayTimer, roomId],
+  );
 
   const sendTextOptimistic = (body: string) => {
     const clientId = newClientId();
@@ -491,6 +639,21 @@ export function Composer({
 
     // Text only — optimistic, doesn't block the input.
     if (!body) return;
+    if (delayTextForSilicon) {
+      if (delayedTextQueueRef.current.length) {
+        void flushDelayedTextQueue({
+          clientId: newClientId(),
+          body,
+          replyToEventId: replyTo?.event_id,
+        });
+        onClearReply?.();
+      } else {
+        queueDelayedTextSend(body);
+      }
+      setText("");
+      persistDraft("");
+      return;
+    }
     sendTextOptimistic(body);
     setText("");
     persistDraft("");
@@ -604,6 +767,21 @@ export function Composer({
             else setFile(null);
           }}
         />
+      )}
+      {queuePaused && queuedTextCount > 0 && (
+        <div className="flex items-center justify-between gap-3 border border-input bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
+          <span className="min-w-0">
+            seems like you are still thinking and continuing the message. Will wait before
+            passing it on to silicon.
+          </span>
+          <button
+            type="button"
+            onClick={() => void flushDelayedTextQueue()}
+            className="shrink-0 text-xs font-medium text-foreground underline-offset-2 hover:underline"
+          >
+            Send anyway
+          </button>
+        </div>
       )}
       {/* One container, hairline border, focus-within bumps to ring colour.
           Internal 1px dividers visually separate attach | input | voice/send

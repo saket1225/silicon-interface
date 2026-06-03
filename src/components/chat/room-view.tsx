@@ -563,6 +563,24 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     });
   }, []);
 
+  const onOptimisticUpdate = React.useCallback(
+    (clientId: string, payload: OptimisticPayload) => {
+      setEvents((prev) =>
+        prev.map((e) =>
+          e._clientId === clientId
+            ? {
+                ...e,
+                type: payload.type,
+                content: payload.content ?? {},
+                reply_to_event_id: payload.reply_to_event_id ?? "",
+              }
+            : e,
+        ),
+      );
+    },
+    [],
+  );
+
   const onFail = React.useCallback((clientId: string, err: unknown) => {
     setEvents((prev) =>
       prev.map((e) => (e._clientId === clientId ? { ...e, _status: "failed" as MessageStatus } : e)),
@@ -800,10 +818,12 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           onOptimisticAdd={onOptimisticAdd}
           onAck={onAck}
           onFail={onFail}
+          onOptimisticUpdate={onOptimisticUpdate}
           droppedFile={droppedFile}
           onDroppedFileConsumed={() => setDroppedFile(null)}
           replyTo={replyTo}
           onClearReply={() => setReplyTo(null)}
+          delayTextForSilicon={room.kind === "direct" && peer?.kind === "silicon"}
         />
       )}
 

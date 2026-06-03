@@ -371,6 +371,23 @@ export interface TakeBackPolicy {
   enabled: boolean;
 }
 
+export interface TakeBackRequest {
+  request_id: string;
+  room_id: string;
+  carbon_id: string;
+  silicon_id: string;
+  status: "scheduled" | "pending" | "completed" | "cancelled";
+  event_ids: string[];
+  message_count: number;
+  scheduled_for: string | null;
+  requested_at: string | null;
+  completed_at: string | null;
+  cancelled_at: string | null;
+  cancel_reason: string;
+  replacement_event_id: string | null;
+  events: Array<Pick<Event, "event_id" | "type" | "content" | "created_at">>;
+}
+
 // ---- WebSocket frames ----
 export type WsFrame =
   | { type: "hello"; subscribed_rooms: string[] }
@@ -392,6 +409,10 @@ export type WsFrame =
       event_ids: string[];
       by_kind: Kind;
       by_id: number | null;
+    }
+  | {
+      type: "take_back_request";
+      request: TakeBackRequest;
     }
   | {
       type: "progress";
