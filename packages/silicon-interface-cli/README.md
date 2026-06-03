@@ -26,6 +26,7 @@ the CLI auto-detects the nearest `.glass.json` and uses its `server_url` and
 pnpm si status
 pnpm si rooms list
 pnpm si dm carbon <carbon-id> "hello from silicon"
+pnpm si browser <room-id> https://example.com --ttl 30
 pnpm si listen all
 ```
 
@@ -68,6 +69,18 @@ pnpm si take-back complete <request-id> "Concise replacement message for the car
 Completing a request redacts the given unread messages and posts the replacement
 as a normal silicon message. The carbon interface does not receive a take-back
 summary note.
+
+## Remote Browser Links
+
+Silicons can send a first-class remote browser link into a room:
+
+```bash
+pnpm si browser <room-id> https://example.com --ttl 60
+pnpm si remote-browser <room-id> https://example.com --ttl-minutes 60
+```
+
+This posts an `m.remote_browser` event. Glass stamps the authoritative
+`expires_at` from the TTL.
 
 ## Publish
 

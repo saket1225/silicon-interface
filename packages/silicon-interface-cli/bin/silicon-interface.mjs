@@ -607,6 +607,8 @@ Rooms and messages:
   messages send <room> <text...> [--reply-to event_id]
   send <room> <text...>   Alias for messages send.
   dm <carbon|silicon> <handle-or-id> [text...]
+  browser <room> <url> [--ttl 60]
+  remote-browser <room> <url> [--ttl-minutes 60]
   chat <room>             Interactive stdin chat for a room.
   listen [room|all]       Stream live WebSocket frames.
 
@@ -884,6 +886,31 @@ async function sendMessage(ctx, args) {
   if (options.replyTo) payload.reply_to_event_id = options.replyTo;
   if (options.final != null) payload.is_final = asBool(options.final);
   const event = await api.sendEvent(ctx, roomId, payload);
+  printResult(ctx, event, (value) => console.log(eventLine(value)));
+}
+
+async function cmdRemoteBrowser(ctx, args) {
+  requireAuth(ctx);
+  const { options, positionals } = parseOptions(args);
+  const roomId = roomArg(ctx, positionals[0]);
+  const url = positionals[1];
+  if (!url) throw new UsageError("Usage: browser <room> <url> [--ttl 60]");
+  try {
+    new globalThis.URL(url);
+  } catch {
+    throw new UsageError(`Invalid URL: ${url}`);
+  }
+  const ttlRaw = options.ttlMinutes ?? options.ttl;
+  const ttlMinutes = ttlRaw == null ? undefined : Number(ttlRaw);
+  if (ttlRaw != null && (!Number.isFinite(ttlMinutes) || ttlMinutes <= 0)) {
+    throw new UsageError("--ttl must be a positive number of minutes.");
+  }
+  const content = { url };
+  if (ttlMinutes !== undefined) content.ttl_minutes = Math.floor(ttlMinutes);
+  const event = await api.sendEvent(ctx, roomId, {
+    type: "m.remote_browser",
+    content,
+  });
   printResult(ctx, event, (value) => console.log(eventLine(value)));
 }
 
@@ -1404,6 +1431,11 @@ async function dispatch(ctx, cmd, args) {
     case "send":
       requireAuth(ctx);
       await sendMessage(ctx, args);
+      return;
+    case "browser":
+    case "remote-browser":
+    case "remote_browser":
+      await cmdRemoteBrowser(ctx, args);
       return;
     case "dm":
       await cmdDm(ctx, args);

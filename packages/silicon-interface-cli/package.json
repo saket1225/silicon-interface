@@ -4,8 +4,8 @@
   "description": "Backend-first CLI for Silicon Interface conversations.",
   "type": "module",
   "bin": {
-    "silicon-interface": "./bin/silicon-interface.mjs",
-    "si": "./bin/silicon-interface.mjs"
+    "silicon-interface": "bin/silicon-interface",
+    "si": "bin/silicon-interface"
   },
   "files": [
     "bin"
@@ -16,7 +16,7 @@
   "license": "UNLICENSED",
   "private": false,
   "publishConfig": {
-    "access": "restricted"
+    "access": "public"
   },
   "scripts": {
     "lint": "eslint bin/silicon-interface.mjs",
