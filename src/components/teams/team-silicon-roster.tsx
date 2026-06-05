@@ -41,7 +41,7 @@ export function TeamSiliconRoster({
       const next = await Promise.all(
         teams.map(async (team) => {
           try {
-            const silicons = await api.teamSilicons(team.slug);
+            const silicons = (await api.teamSilicons(team.slug)).filter((s) => s.is_active);
             return { team, silicons };
           } catch (e) {
             const msg = e instanceof ApiError ? e.message : String(e);
@@ -87,7 +87,7 @@ export function TeamSiliconRoster({
               {group.team.name}
             </div>
             {group.silicons.length === 0 ? (
-              <div className="px-6 py-2 text-xs text-muted-foreground">No silicons yet.</div>
+              <div className="px-6 py-2 text-xs text-muted-foreground">No active silicons.</div>
             ) : (
               <ul>
                 {group.silicons.map((silicon) => {
