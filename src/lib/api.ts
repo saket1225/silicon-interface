@@ -26,6 +26,7 @@ import type {
   TakeBackPolicy,
   Team,
   TeamMembership,
+  TeamRole,
 } from "./types";
 
 class ApiError extends Error {
@@ -185,6 +186,7 @@ export const api = {
   createTeam: (data: { name: string; slug?: string }) => call<Team>("POST", "/api/v1/teams/", data),
   patchTeam: (slug: string, patch: Partial<Team>) => call<Team>("PATCH", `/api/v1/teams/${slug}/`, patch),
   teamMembers: (slug: string) => call<TeamMembership[]>("GET", `/api/v1/teams/${slug}/members`),
+  teamSilicons: (slug: string) => call<Silicon[]>("GET", `/api/v1/teams/${slug}/silicons`),
   teamReactivity: (slug: string) => call<{ value: number }>("GET", `/api/v1/teams/${slug}/reactivity`),
   teamStructure: (slug: string) => call<{ svg: string }>("GET", `/api/v1/teams/${slug}/structure`),
   teamInvites: (slug: string) => call<Invite[]>("GET", `/api/v1/teams/${slug}/invites`),
@@ -195,7 +197,7 @@ export const api = {
       silicon_id?: string;
       channel?: "link" | "email";
       email_target?: string;
-      role?: string;
+      role?: TeamRole;
       max_uses?: number;
       ttl_minutes?: number;
     },
@@ -207,7 +209,7 @@ export const api = {
     ),
   inviteInfo: (token: string) => call<InviteInfo>("GET", `/api/v1/invites/${encodeURIComponent(token)}`),
   acceptInvite: (token: string, body: { code?: string } = {}) =>
-    call<{ joined: string; scope: string; role: string }>(
+    call<{ joined: string; scope: string; role: TeamRole }>(
       "POST",
       `/api/v1/invites/${encodeURIComponent(token)}/accept`,
       body,

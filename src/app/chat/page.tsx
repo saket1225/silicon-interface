@@ -67,6 +67,7 @@ import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
 import { RoomView } from "@/components/chat/room-view";
 import { TeamFilterBar, EMPTY_FILTERS, type ChatFilters } from "@/components/teams/team-filter-bar";
 import { TeamPanel } from "@/components/teams/team-panel";
+import { TeamSiliconRoster } from "@/components/teams/team-silicon-roster";
 
 // Resizable sidebar bounds + storage. Width persists across reloads.
 const SB_DEFAULT = 320;
@@ -205,7 +206,9 @@ function ChatPageInner() {
   }, []);
 
   React.useEffect(() => {
-    void refresh();
+    (async () => {
+      await refresh();
+    })();
   }, [refresh]);
 
   // Tick every 15s so the sidebar's relative timestamps keep advancing
@@ -322,16 +325,18 @@ function ChatPageInner() {
   // server-side, but we zero the count immediately so the sidebar matches.
   React.useEffect(() => {
     if (!selected) return;
-    setRooms((prev) => {
-      // Bail out (return the same array) when there's nothing to clear so we
-      // don't trigger a needless re-render on every room switch.
-      const needsClear = prev.some(
-        (r) => r.room_id === selected && (r.unread || (r.unread_count ?? 0) > 0),
-      );
-      if (!needsClear) return prev;
-      return prev.map((r) =>
-        r.room_id === selected ? { ...r, unread: false, unread_count: 0 } : r,
-      );
+    queueMicrotask(() => {
+      setRooms((prev) => {
+        // Bail out (return the same array) when there's nothing to clear so we
+        // don't trigger a needless re-render on every room switch.
+        const needsClear = prev.some(
+          (r) => r.room_id === selected && (r.unread || (r.unread_count ?? 0) > 0),
+        );
+        if (!needsClear) return prev;
+        return prev.map((r) =>
+          r.room_id === selected ? { ...r, unread: false, unread_count: 0 } : r,
+        );
+      });
     });
   }, [selected]);
 
@@ -421,6 +426,13 @@ function ChatPageInner() {
           filters={filters}
           onChange={setFilters}
           onOpenTeam={(slug) => setPanelSlug(slug)}
+        />
+        <TeamSiliconRoster
+          teams={teams}
+          onOpenRoom={(room) => {
+            setRooms((prev) => (prev.some((r) => r.room_id === room.room_id) ? prev : [...prev, room]));
+            router.push(`/chat?room=${room.room_id}`);
+          }}
         />
         <RoomList
           rooms={filtered}

@@ -180,13 +180,15 @@ export interface Team {
   updated_at: string;
 }
 
+export type TeamRole = "member" | "head";
+
 export interface TeamMembership {
   id: number;
   team: number;
   member_kind: Kind;
   member_id: number;
   member_handle: string | null;
-  role: string;
+  role: TeamRole;
   joined_at: string;
 }
 
@@ -198,7 +200,7 @@ export interface Invite {
   channel: "link" | "email";
   code: string;
   email_target: string;
-  role: string;
+  role: TeamRole;
   max_uses: number;
   uses: number;
   expires_at: string;
@@ -277,7 +279,7 @@ export interface InviteInfo {
   needs_code: boolean;
   verify_carbons: boolean;
   whitelist: { domains: string[]; emails: string[] } | null;
-  role: string;
+  role: TeamRole;
 }
 
 export interface LinkPreview {
