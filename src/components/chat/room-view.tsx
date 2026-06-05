@@ -884,7 +884,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             })
           )}
           {!search && activeProgress?.roomId === room.room_id ? (
-            <ProgressLine entry={activeProgress} />
+            <ProgressLine
+              entry={activeProgress}
+              avatarSeed={headerSeed}
+              avatarSrc={headerPhoto}
+            />
           ) : null}
           <div ref={endRef} />
         </div>
@@ -947,7 +951,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   );
 }
 
-function ProgressLine({ entry }: { entry: ProgressEntry }) {
+function ProgressLine({
+  entry,
+  avatarSeed,
+  avatarSrc,
+}: {
+  entry: ProgressEntry;
+  avatarSeed: string;
+  avatarSrc?: string | null;
+}) {
   const [tick, setTick] = React.useState(0);
 
   React.useEffect(() => {
@@ -957,15 +969,22 @@ function ProgressLine({ entry }: { entry: ProgressEntry }) {
   }, [entry.groupId, entry.state, entry.note]);
 
   return (
-    <div className="silicon-activity-line my-2 flex min-h-7 items-center text-sm">
-      <span className="inline-flex min-w-0 items-center gap-2 truncate">
-        <span className="silicon-activity-core" aria-hidden="true">
-          {Array.from({ length: 16 }, (_, i) => (
-            <span key={i} />
-          ))}
+    <div className="my-2 flex w-full justify-start gap-2">
+      <div className="mt-1 w-7 shrink-0">
+        <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} />
+      </div>
+      <div className="max-w-[70%]">
+        <span className="silicon-activity-line flex min-h-7 items-center text-sm">
+          <span className="inline-flex min-w-0 items-center gap-2 truncate">
+            <span className="silicon-activity-core" aria-hidden="true">
+              {Array.from({ length: 16 }, (_, i) => (
+                <span key={i} />
+              ))}
+            </span>
+            <span className="silicon-activity-copy truncate">{formatProgressLine(entry, tick)}</span>
+          </span>
         </span>
-        <span className="silicon-activity-copy truncate">{formatProgressLine(entry, tick)}</span>
-      </span>
+      </div>
     </div>
   );
 }

@@ -106,7 +106,7 @@ const MAX_ROWS = 12;
 const EMOJI_COLS = 8;
 const EMOJI_LIMIT = EMOJI_COLS * 4; // 4 rows
 const SILICON_TEXT_SEND_DELAY_MS = 5000;
-const CONTINUING_DRAFT_MIN_CHARS = 3;
+const CONTINUING_DRAFT_MIN_CHARS = 2;
 
 interface QueuedTextSend {
   clientId: string;
@@ -484,9 +484,7 @@ export function Composer({
   }, []);
 
   const hasContinuingDraft = React.useCallback(
-    () =>
-      typingActiveRef.current &&
-      textRef.current.trim().length >= CONTINUING_DRAFT_MIN_CHARS,
+    () => textRef.current.trim().length >= CONTINUING_DRAFT_MIN_CHARS,
     [],
   );
 
@@ -771,8 +769,7 @@ export function Composer({
       {queuePaused && queuedTextCount > 0 && (
         <div className="flex items-center justify-between gap-3 border border-input bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
           <span className="min-w-0">
-            seems like you are still thinking and continuing the message. Will wait before
-            passing it on to silicon.
+            holding this while you finish typing. Send anyway when ready.
           </span>
           <button
             type="button"
@@ -783,12 +780,9 @@ export function Composer({
           </button>
         </div>
       )}
-      {/* One container, hairline border, focus-within bumps to ring colour.
-          Internal 1px dividers visually separate attach | input | voice/send
-          while still reading as a single field. */}
-      {/* `items-end` docks the fixed-size attach/send buttons to the bottom so
-          they keep a constant height while the textarea grows upward. */}
-      <div className="flex items-end border border-transparent transition-colors focus-within:border-ring">
+      {/* One bordered field. Controls stretch with multiline drafts so the
+          attachment and send edges never visually disappear. */}
+      <div className="flex items-stretch border border-input transition-colors focus-within:border-ring">
         <input
           type="file"
           ref={fileInputRef}
@@ -801,7 +795,7 @@ export function Composer({
           title="attach file"
           aria-label="attach file"
           disabled={busy}
-          className="flex h-11 w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+          className="flex min-h-11 w-11 shrink-0 items-center justify-center border-r border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
         >
           <Paperclip />
         </button>
@@ -828,7 +822,7 @@ export function Composer({
             }}
             placeholder="message…"
             rows={MIN_ROWS}
-            className="resize-none self-stretch bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
+            className="min-h-11 resize-none bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
             onKeyDown={(e) => {
               // Emoji picker keyboard navigation — true 2-D grid: ←/→ move one
               // cell, ↑/↓ move a whole row.
@@ -923,7 +917,7 @@ export function Composer({
             disabled={busy}
             title="record voice message"
             aria-label="record voice message"
-            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
+            className="flex min-h-11 w-11 shrink-0 items-center justify-center border-l border-input text-foreground transition-colors hover:bg-accent disabled:opacity-50"
           >
             <Microphone />
           </button>
@@ -933,7 +927,7 @@ export function Composer({
             onClick={send}
             disabled={busy || (!!file && uploadStatus !== "ready")}
             aria-label="send"
-            className="flex h-11 w-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="flex min-h-11 w-11 shrink-0 items-center justify-center border-l border-input bg-primary text-primary-foreground transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {busy || (!!file && uploadStatus === "uploading") ? (
               <CircleNotch className="animate-spin" />
