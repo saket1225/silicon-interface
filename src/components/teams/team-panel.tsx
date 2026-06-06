@@ -384,6 +384,7 @@ function monthLabel(iso: string): string {
 function BillingSection({ slug }: { slug: string }) {
   const [data, setData] = React.useState<BillingData | null>(null);
   const [busy, setBusy] = React.useState(false);
+  const [checkoutLoading, setCheckoutLoading] = React.useState(false);
 
   const load = React.useCallback(async () => {
     try {
@@ -398,35 +399,28 @@ function BillingSection({ slug }: { slug: string }) {
     void load();
   }, [load]);
 
-  const run = (fn: () => Promise<void>) => async () => {
+  const payOutstanding = async (cycleIds: number[]) => {
     setBusy(true);
+    setCheckoutLoading(true);
     try {
-      await fn();
-    } catch (e) {
-      toast.error(e instanceof ApiError ? e.message : String(e));
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const payOutstanding = (cycleIds: number[]) => {
-    const checkoutTab = window.open("about:blank", "_blank");
-    if (checkoutTab) checkoutTab.opener = null;
-    return run(async () => {
       if (cycleIds.length === 0) {
-        checkoutTab?.close();
+        setCheckoutLoading(false);
         toast.info("No pending balance.");
         return;
       }
       const r = await api.teamCheckout(slug, { cycle_ids: cycleIds, return_url: window.location.href });
       if (r.checkout_url) {
-        if (checkoutTab) checkoutTab.location.href = r.checkout_url;
-        else window.open(r.checkout_url, "_blank", "noopener,noreferrer");
+        window.location.assign(r.checkout_url);
       } else {
-        checkoutTab?.close();
+        setCheckoutLoading(false);
         toast.error(r.error || "Checkout unavailable.");
       }
-    })();
+    } catch (e) {
+      setCheckoutLoading(false);
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
   };
 
   if (!data) {
@@ -462,9 +456,22 @@ function BillingSection({ slug }: { slug: string }) {
             disabled={busy || pendingAmount <= 0}
             onClick={() => payOutstanding(pendingCycleIds)}
           >
-            {pendingAmount > 0 ? `Pay ${fmtCents(pendingAmount, pendingCurrency)}` : "Paid up"}
+            {checkoutLoading ? (
+              <>
+                <CircleNotch className="animate-spin" /> loading
+              </>
+            ) : pendingAmount > 0 ? (
+              `Pay ${fmtCents(pendingAmount, pendingCurrency)}`
+            ) : (
+              "Paid up"
+            )}
           </Button>
         </div>
+        {checkoutLoading ? (
+          <div className="border bg-background p-3 text-sm text-muted-foreground">
+            Preparing checkout. You will be redirected once the payment link is ready.
+          </div>
+        ) : null}
 
         <div className="space-y-4">
           <div className="space-y-2">
@@ -710,65 +717,103 @@ function InviteSection({ slug }: { slug: string }) {
   });
 
   const link = invite
-    ? `${window.location.origin}/join/${invite.token}?code=${invite.code}`
+    ? `${typeof window === "undefined" ? "" : window.location.origin}/join/${invite.token}?code=${invite.code}`
     : "";
 
   return (
     <Section title="invites">
-      <div className="space-y-3">
-        <div className="flex items-end gap-2">
-          <div className="space-y-1">
-            <Label htmlFor="maxuses">seats per code</Label>
-            <Input
-              id="maxuses"
-              type="number"
-              min={1}
-              value={maxUses}
-              onChange={(e) => setMaxUses(Math.max(1, Number(e.target.value) || 1))}
-              className="w-24"
-            />
+      <div className="grid gap-4 lg:grid-cols-2">
+        <div className="border bg-card">
+          <div className="flex items-center gap-3 border-b p-4">
+            <div className="grid size-10 place-items-center border bg-background">
+              <LinkSimple className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <h4 className="font-semibold">Shareable link</h4>
+              <p className="text-sm text-muted-foreground">Create a rotating join code for a limited number of seats.</p>
+            </div>
           </div>
-          <Button onClick={createLink} disabled={busy}>
-            {busy ? <CircleNotch className="animate-spin" /> : <LinkSimple />} create link
-          </Button>
-        </div>
-
-        {invite && (
-          <div className="space-y-1 border bg-card p-3 text-sm">
-            <div className="flex items-center justify-between gap-2">
-              <span className="truncate font-mono text-xs">{link}</span>
-              <Button
-                size="icon"
-                variant="ghost"
-                onClick={() => {
-                  navigator.clipboard.writeText(link);
-                  toast.success("link copied");
-                }}
-              >
-                <Copy />
+          <div className="space-y-4 p-4">
+            <div className="flex items-end gap-3">
+              <div className="space-y-1">
+                <Label htmlFor="maxuses">seats</Label>
+                <Input
+                  id="maxuses"
+                  type="number"
+                  min={1}
+                  value={maxUses}
+                  onChange={(e) => setMaxUses(Math.max(1, Number(e.target.value) || 1))}
+                  className="h-11 w-24 text-center font-mono"
+                />
+              </div>
+              <Button onClick={createLink} disabled={busy} className="h-11 flex-1">
+                {busy ? <CircleNotch className="animate-spin" /> : <LinkSimple />} create link
               </Button>
             </div>
-            <p className="text-muted-foreground">
-              code <span className="font-mono text-foreground">{invite.code}</span> · rotates after{" "}
-              {invite.max_uses} {invite.max_uses === 1 ? "join" : "joins"}
-            </p>
-          </div>
-        )}
 
-        <div className="flex items-end gap-2">
-          <div className="flex-1 space-y-1">
-            <Label htmlFor="invemail">invite by email</Label>
-            <Input
-              id="invemail"
-              type="email"
-              placeholder="person@example.com"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-            />
+            {invite ? (
+              <div className="border bg-background">
+                <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
+                  <span className="truncate font-mono text-xs">{link}</span>
+                  <Button
+                    size="icon"
+                    variant="ghost"
+                    onClick={() => {
+                      navigator.clipboard.writeText(link);
+                      toast.success("link copied");
+                    }}
+                    aria-label="copy invite link"
+                  >
+                    <Copy />
+                  </Button>
+                </div>
+                <div className="grid grid-cols-2 divide-x text-sm">
+                  <div className="p-3">
+                    <div className="label-mono">code</div>
+                    <div className="mt-1 font-mono text-xl font-semibold">{invite.code}</div>
+                  </div>
+                  <div className="p-3">
+                    <div className="label-mono">rotates after</div>
+                    <div className="mt-1 font-mono text-xl font-semibold">
+                      {invite.max_uses} {invite.max_uses === 1 ? "join" : "joins"}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            ) : (
+              <div className="border border-dashed bg-background/50 p-4 text-sm text-muted-foreground">
+                Generated invite links will appear here.
+              </div>
+            )}
           </div>
-          <Button variant="outline" onClick={inviteByEmail} disabled={busy}>
-            <Envelope /> send
-          </Button>
+        </div>
+
+        <div className="border bg-card">
+          <div className="flex items-center gap-3 border-b p-4">
+            <div className="grid size-10 place-items-center border bg-background">
+              <Envelope className="h-5 w-5" />
+            </div>
+            <div className="min-w-0">
+              <h4 className="font-semibold">Email invite</h4>
+              <p className="text-sm text-muted-foreground">Send a targeted one-time invite to a specific carbon.</p>
+            </div>
+          </div>
+          <div className="space-y-3 p-4">
+            <div className="space-y-1">
+              <Label htmlFor="invemail">email</Label>
+              <Input
+                id="invemail"
+                type="email"
+                placeholder="person@example.com"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                className="h-11"
+              />
+            </div>
+            <Button variant="outline" onClick={inviteByEmail} disabled={busy} className="h-11 w-full">
+              {busy ? <CircleNotch className="animate-spin" /> : <Envelope />} send invite
+            </Button>
+          </div>
         </div>
       </div>
     </Section>

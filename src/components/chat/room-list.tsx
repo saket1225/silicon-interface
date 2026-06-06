@@ -103,7 +103,7 @@ export function RoomList({
                     if (e.dataTransfer?.types?.includes("Files")) e.preventDefault();
                   }}
                   className={cn(
-                    "flex w-full items-center gap-3 py-3 pl-6 pr-4 text-left transition-colors",
+                    "grid w-full grid-cols-[36px_minmax(0,1fr)] items-center gap-3 py-3 pl-6 pr-4 text-left transition-colors",
                     selectedId === r.room_id
                       ? "bg-secondary"
                       : isHover
@@ -118,8 +118,8 @@ export function RoomList({
                     className="mt-0.5"
                   />
                   <div className="min-w-0 flex-1 overflow-hidden">
-                    <div className="flex items-center justify-between gap-2">
-                      <span className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_3.75rem] items-center gap-2">
+                      <span className="flex min-w-0 items-center gap-1.5 overflow-hidden">
                         {r.observed && (
                           <Eye
                             className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
@@ -142,7 +142,7 @@ export function RoomList({
                       </span>
                       <span
                         className={cn(
-                          "shrink-0 text-[10px]",
+                          "min-w-0 truncate text-right text-[10px]",
                           unread > 0
                             ? "font-medium text-foreground"
                             : "text-muted-foreground",
@@ -154,7 +154,7 @@ export function RoomList({
                     {/* Last-message preview (one line, type-aware) + unread
                         badge. Preview falls back to the static subtitle when
                         the room has no events. */}
-                    <div className="flex min-w-0 items-center justify-between gap-2">
+                    <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2">
                       <p
                         className={cn(
                           "min-w-0 flex-1 truncate text-xs",
@@ -229,5 +229,5 @@ function fileNamePreview(preview: string): string {
 function roomPreview(room: Room, fallback: string): string {
   const raw = room.last_event?.preview || fallback;
   const compact = raw.replace(/\s+/g, " ").trim();
-  return compact.length > 42 ? `${compact.slice(0, 42).trimEnd()}...` : compact;
+  return compact.length > 34 ? `${compact.slice(0, 34).trimEnd()}...` : compact;
 }

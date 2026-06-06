@@ -104,7 +104,8 @@ const PROGRESS_STATE_COPY: Partial<Record<ProgressState, string[]>> = {
   ],
   thinking: SILICON_PROGRESS_COPY,
 };
-const PROGRESS_TYPE_MS = { min: 17, max: 31, erase: 10 };
+const MIN_PROGRESS_STATUS_MS = 1000;
+const PROGRESS_TYPE_MS = { min: 13, max: 24, erase: 8 };
 const ROOM_SNIPPET_LIMIT = 40;
 
 export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
@@ -811,6 +812,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     !search &&
     activeProgress?.roomId === room.room_id &&
     latestVisibleEvent?.sender_kind !== "silicon";
+  const progressAvatarHandle = React.useMemo(() => {
+    for (let i = visibleEvents.length - 1; i >= 0; i--) {
+      const event = visibleEvents[i];
+      if (event.sender_kind === "silicon" && event.sender_handle) return event.sender_handle;
+    }
+    if (peer?.kind === "silicon") return peer.handle;
+    return headerSeed;
+  }, [visibleEvents, peer, headerSeed]);
+  const progressAvatarSrc = React.useMemo(() => {
+    if (!progressAvatarHandle) return headerPhoto;
+    return photoFor("silicon", progressAvatarHandle) ?? headerPhoto;
+  }, [progressAvatarHandle, photoFor, headerPhoto]);
 
   const openSenderProfile = React.useCallback(
     (sender: { kind: "carbon" | "silicon"; handle: string }) => {
@@ -1003,8 +1016,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           {shouldShowActiveProgress ? (
             <ProgressLine
               entry={activeProgress}
-              avatarSeed={headerSeed}
-              avatarSrc={headerPhoto}
+              avatarSeed={progressAvatarHandle || headerSeed}
+              avatarSrc={progressAvatarSrc}
             />
           ) : null}
           <div ref={endRef} />
@@ -1084,6 +1097,7 @@ function ProgressLine({
   const [target, setTarget] = React.useState(() => formatProgressLine(entry, 0));
   const [phase, setPhase] = React.useState<"typing" | "holding" | "erasing">("typing");
   const holdMsRef = React.useRef(6500);
+  const targetSinceRef = React.useRef(Date.now());
 
   React.useEffect(() => {
     typedRef.current = typed;
@@ -1091,16 +1105,31 @@ function ProgressLine({
 
   React.useEffect(() => {
     const next = formatProgressLine(entry, 0);
-    setTick(0);
-    if (typedRef.current && typedRef.current !== next) {
-      pendingTargetRef.current = next;
-      setPhase("erasing");
-      return;
+    const apply = () => {
+      setTick(0);
+      if (typedRef.current === next) {
+        pendingTargetRef.current = null;
+        targetSinceRef.current = Date.now();
+        setTarget(next);
+        return;
+      }
+      if (typedRef.current && typedRef.current !== next) {
+        pendingTargetRef.current = next;
+        setPhase("erasing");
+        return;
+      }
+      pendingTargetRef.current = null;
+      targetSinceRef.current = Date.now();
+      setTarget(next);
+      setTyped("");
+      setPhase("typing");
+    };
+    const remainingHold = MIN_PROGRESS_STATUS_MS - (Date.now() - targetSinceRef.current);
+    if (typedRef.current && typedRef.current !== next && remainingHold > 0) {
+      const timeoutId = window.setTimeout(apply, remainingHold);
+      return () => window.clearTimeout(timeoutId);
     }
-    pendingTargetRef.current = null;
-    setTarget(next);
-    setTyped("");
-    setPhase("typing");
+    apply();
   }, [entry.groupId, entry.state, entry.note, entry.source]);
 
   React.useEffect(() => {
@@ -1123,6 +1152,7 @@ function ProgressLine({
       timeoutId = window.setTimeout(() => setTyped((text) => text.slice(0, -1)), PROGRESS_TYPE_MS.erase);
     } else {
       if (pendingTargetRef.current) {
+        targetSinceRef.current = Date.now();
         setTarget(pendingTargetRef.current);
         pendingTargetRef.current = null;
         setPhase("typing");
@@ -1130,6 +1160,7 @@ function ProgressLine({
       }
       const nextTick = tick + 1;
       setTick(nextTick);
+      targetSinceRef.current = Date.now();
       setTarget(formatProgressLine(entry, nextTick));
       setPhase("typing");
     }
@@ -1188,13 +1219,30 @@ function progressStateLabel(state: ProgressState): string {
 }
 
 function meaningfulProgressNote(note: string, state: ProgressState): string {
-  const text = note.trim();
+  const text = collapsePathMentions(note.trim());
   if (!text) return "";
   const normalized = text.toLowerCase().replace(/[.…]+$/g, "").trim();
   if (state === "thinking" && (normalized === "thinking" || normalized.startsWith("thought for "))) {
     return "";
   }
   return text;
+}
+
+function collapsePathMentions(value: string): string {
+  return value.replace(
+    /(`?)(?!(?:[a-z][a-z0-9+.-]*:\/\/))((?:~?\/|\.{1,2}\/|[A-Za-z]:[\\/]|(?:[A-Za-z0-9_.-]+[\\/]))[^\s`"'<>]*)(`?)/gi,
+    (match, open: string, rawPath: string, close: string, offset: number, input: string) => {
+      if (input.slice(Math.max(0, offset - 8), offset).includes("://")) return match;
+      const suffixMatch = rawPath.match(/[),.;:\]}]+$/);
+      const suffix = suffixMatch?.[0] ?? "";
+      const path = suffix ? rawPath.slice(0, -suffix.length) : rawPath;
+      const parts = path.split(/[\\/]+/).filter(Boolean);
+      const fileName = parts[parts.length - 1];
+      if (!fileName || fileName === path) return match;
+      const tick = open || close ? "`" : "";
+      return `${tick}${fileName}${tick}${suffix}`;
+    },
+  );
 }
 
 function sentenceCase(value: string): string {
