@@ -315,8 +315,8 @@ export interface Event {
   /** #25 — OG-style link preview projection, only set when body contains
    *  exactly one URL. */
   link_preview?: LinkPreview | null;
-  /** Human's local wall-clock time, e.g. "9:33 (GMT+5:30)". Only populated
-   *  for silicon fetches; null for carbon requesters. */
+  /** Human's local wall-clock time, e.g. "4:13pm (utc+5:30 - user's timezone)".
+   *  Only populated for silicon fetches; null for carbon requesters. */
   display_time?: string | null;
 }
 

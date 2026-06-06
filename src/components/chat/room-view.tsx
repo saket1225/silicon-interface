@@ -104,7 +104,8 @@ const PROGRESS_STATE_COPY: Partial<Record<ProgressState, string[]>> = {
   ],
   thinking: SILICON_PROGRESS_COPY,
 };
-const PROGRESS_TYPE_MS = { min: 14, max: 26, erase: 8 };
+const PROGRESS_TYPE_MS = { min: 17, max: 31, erase: 10 };
+const ROOM_SNIPPET_LIMIT = 40;
 
 export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }: Props) {
   const { carbon } = useAuth();
@@ -271,8 +272,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
   React.useEffect(() => {
     let mounted = true;
     const roomId = room.room_id;
-    setLoading(true);
-    setEvents([]);
+    const cachedEvents = readRoomEventSnippet(roomId);
+    setLoading(false);
+    setEvents(cachedEvents ?? []);
     setActiveProgress(null);
     setActivities({});
     setReplyTo(null);
@@ -282,7 +284,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       .events(roomId, undefined, 100)
       .then((evs) => {
         if (!mounted) return;
-        setEvents(mergeServerEvents([], evs, myUsername));
+        setEvents((prev) => {
+          const pending = prev.filter((e) => e.event_id.startsWith("temp-") || e._status === "pending");
+          return mergeServerEvents(pending, evs, myUsername);
+        });
         setLoading(false);
       })
       .catch((e) => {
@@ -294,6 +299,11 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
       mounted = false;
     };
   }, [room.room_id, myUsername]);
+
+  React.useEffect(() => {
+    if (loading) return;
+    saveRoomEventSnippet(room.room_id, events);
+  }, [events, loading, room.room_id]);
 
   // Force a re-render every 10s so `relativeTime` advances ("just now" →
   // "1m" → "2m"). No network — purely a UI tick.
@@ -1069,12 +1079,26 @@ function ProgressLine({
 }) {
   const [tick, setTick] = React.useState(0);
   const [typed, setTyped] = React.useState("");
+  const typedRef = React.useRef("");
+  const pendingTargetRef = React.useRef<string | null>(null);
+  const [target, setTarget] = React.useState(() => formatProgressLine(entry, 0));
   const [phase, setPhase] = React.useState<"typing" | "holding" | "erasing">("typing");
   const holdMsRef = React.useRef(6500);
-  const fullText = formatProgressLine(entry, tick);
 
   React.useEffect(() => {
+    typedRef.current = typed;
+  }, [typed]);
+
+  React.useEffect(() => {
+    const next = formatProgressLine(entry, 0);
     setTick(0);
+    if (typedRef.current && typedRef.current !== next) {
+      pendingTargetRef.current = next;
+      setPhase("erasing");
+      return;
+    }
+    pendingTargetRef.current = null;
+    setTarget(next);
     setTyped("");
     setPhase("typing");
   }, [entry.groupId, entry.state, entry.note, entry.source]);
@@ -1082,10 +1106,11 @@ function ProgressLine({
   React.useEffect(() => {
     let timeoutId: number | null = null;
     if (phase === "typing") {
-      if (typed.length < fullText.length) {
+      if (typed.length < target.length) {
         timeoutId = window.setTimeout(
-          () => setTyped(fullText.slice(0, typed.length + 1)),
-          PROGRESS_TYPE_MS.min + Math.floor(Math.random() * (PROGRESS_TYPE_MS.max - PROGRESS_TYPE_MS.min + 1)),
+          () => setTyped(target.slice(0, typed.length + 1)),
+          PROGRESS_TYPE_MS.min +
+            Math.floor(Math.random() * (PROGRESS_TYPE_MS.max - PROGRESS_TYPE_MS.min + 1)),
         );
       } else {
         if (entry.source === "server") return;
@@ -1097,13 +1122,21 @@ function ProgressLine({
     } else if (typed.length > 0) {
       timeoutId = window.setTimeout(() => setTyped((text) => text.slice(0, -1)), PROGRESS_TYPE_MS.erase);
     } else {
-      setTick((n) => n + 1);
+      if (pendingTargetRef.current) {
+        setTarget(pendingTargetRef.current);
+        pendingTargetRef.current = null;
+        setPhase("typing");
+        return;
+      }
+      const nextTick = tick + 1;
+      setTick(nextTick);
+      setTarget(formatProgressLine(entry, nextTick));
       setPhase("typing");
     }
     return () => {
       if (timeoutId !== null) window.clearTimeout(timeoutId);
     };
-  }, [phase, typed, fullText, entry.source]);
+  }, [phase, typed, target, entry, tick]);
 
   return (
     <div className="my-2 flex w-full items-center justify-start gap-2">
@@ -1258,6 +1291,39 @@ function formatActivities(
       ? handles[0]
       : `${handles.slice(0, -1).join(", ")} & ${handles.slice(-1)}`;
   return `${who} is ${verb}…`;
+}
+
+function roomSnippetKey(roomId: string): string {
+  return `silicon-interface:room-snippet:${roomId}`;
+}
+
+function readRoomEventSnippet(roomId: string): LocalEvent[] | null {
+  if (typeof window === "undefined") return null;
+  try {
+    const raw = window.localStorage.getItem(roomSnippetKey(roomId));
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { events?: Event[] };
+    if (!Array.isArray(parsed.events)) return null;
+    return parsed.events.filter((event) => event && typeof event.event_id === "string");
+  } catch {
+    return null;
+  }
+}
+
+function saveRoomEventSnippet(roomId: string, events: LocalEvent[]): void {
+  if (typeof window === "undefined") return;
+  try {
+    const durable = events
+      .filter((event) => !event.event_id.startsWith("temp-") && event.type !== "m.progress")
+      .slice(-ROOM_SNIPPET_LIMIT)
+      .map(({ _clientId, _status, ...event }) => event);
+    window.localStorage.setItem(
+      roomSnippetKey(roomId),
+      JSON.stringify({ savedAt: Date.now(), events: durable }),
+    );
+  } catch {
+    /* Keep chat usable when localStorage is unavailable or full. */
+  }
 }
 
 function mergeServerEvents(
