@@ -263,15 +263,16 @@ function MembersPreview({
   members: TeamMembership[];
   onViewAll: () => void;
 }) {
-  const preview = members.slice(0, 10);
+  const visibleMembers = members.filter((m) => !isHiddenInterfaceMember(m));
+  const preview = visibleMembers.slice(0, 10);
   return (
-    <Section title={`members · ${members.length}`}>
+    <Section title={`members · ${visibleMembers.length}`}>
       {preview.length === 0 ? (
         <p className="border bg-muted/40 p-4 text-sm text-muted-foreground">No members in this team yet.</p>
       ) : (
         <ul className="divide-y border">
           {preview.map((m) => {
-            const handle = m.member_handle ? `@${m.member_handle}` : `${m.member_kind} #${m.member_id}`;
+            const handle = teamMemberHandle(m);
             return (
               <li key={m.id} className="flex items-center justify-between gap-3 px-3 py-3 text-sm">
                 <span className="flex min-w-0 items-center gap-3">
@@ -291,7 +292,7 @@ function MembersPreview({
           })}
         </ul>
       )}
-      {members.length > 10 ? (
+      {visibleMembers.length > 10 ? (
         <Button variant="outline" size="sm" onClick={onViewAll}>
           View all members
         </Button>
@@ -302,12 +303,13 @@ function MembersPreview({
 
 function MembersSection({ members }: { members: TeamMembership[] }) {
   const [active, setActive] = React.useState<"carbon" | "silicon">("carbon");
-  const carbons = members.filter((m) => m.member_kind === "carbon");
-  const silicons = members.filter((m) => m.member_kind === "silicon");
+  const visibleMembers = members.filter((m) => !isHiddenInterfaceMember(m));
+  const carbons = visibleMembers.filter((m) => m.member_kind === "carbon");
+  const silicons = visibleMembers.filter((m) => m.member_kind === "silicon");
   const rows = active === "carbon" ? carbons : silicons;
 
   return (
-    <Section title={`members · ${members.length}`}>
+    <Section title={`members · ${visibleMembers.length}`}>
       <div className="flex h-10 items-stretch border-b">
         <MemberTab
           active={active === "carbon"}
@@ -327,7 +329,7 @@ function MembersSection({ members }: { members: TeamMembership[] }) {
       ) : (
         <ul className="divide-y border-x border-b">
           {rows.map((m) => {
-            const handle = m.member_handle ? `@${m.member_handle}` : `${m.member_kind} #${m.member_id}`;
+            const handle = teamMemberHandle(m);
             return (
               <li key={m.id} className="flex items-center justify-between gap-3 px-3 py-3 text-sm">
                 <span className="flex min-w-0 items-center gap-3">
@@ -349,6 +351,17 @@ function MembersSection({ members }: { members: TeamMembership[] }) {
       )}
     </Section>
   );
+}
+
+function isHiddenInterfaceMember(m: TeamMembership): boolean {
+  const handle = (m.member_handle || "").toLowerCase();
+  return m.member_kind === "carbon" && (handle === "lords" || handle === "lords@unlikefraction.com");
+}
+
+function teamMemberHandle(m: TeamMembership): string {
+  const handle = m.member_handle || "";
+  if (handle.toLowerCase() === "lords@unlikefraction.com") return "@lords";
+  return handle ? `@${handle}` : `${m.member_kind} #${m.member_id}`;
 }
 
 function MemberTab({
@@ -757,13 +770,14 @@ function InviteSection({ slug }: { slug: string }) {
     return (
       <div
         key={invite.id}
-        className={cn("border bg-background", !invite.is_active && "opacity-60")}
+        className={cn("w-full min-w-0 max-w-full overflow-hidden border bg-background", !invite.is_active && "opacity-60")}
       >
-        <div className="flex items-center gap-2 border-b px-3 py-2">
+        <div className="flex min-w-0 items-center gap-2 border-b px-3 py-2">
           <span className="min-w-0 flex-1 truncate font-mono text-xs">{link}</span>
           <Button
             size="icon"
             variant="ghost"
+            className="shrink-0"
             onClick={() => {
               navigator.clipboard.writeText(link);
               toast.success("link copied");
@@ -776,6 +790,7 @@ function InviteSection({ slug }: { slug: string }) {
             <Button
               size="sm"
               variant={invite.is_active ? "destructive" : "ghost"}
+              className="shrink-0"
               disabled={busy || !invite.is_active}
               onClick={() => disableInvite(invite)}
             >
@@ -783,16 +798,16 @@ function InviteSection({ slug }: { slug: string }) {
             </Button>
           ) : null}
         </div>
-        <div className="grid grid-cols-3 divide-x text-sm">
-          <div className="p-3">
+        <div className="grid grid-cols-1 divide-y text-sm sm:grid-cols-3 sm:divide-x sm:divide-y-0">
+          <div className="min-w-0 p-3">
             <div className="label-mono">code</div>
             <div className="mt-1 font-mono text-xl font-semibold">{invite.code}</div>
           </div>
-          <div className="p-3">
+          <div className="min-w-0 p-3">
             <div className="label-mono">seats left</div>
             <div className="mt-1 font-mono text-xl font-semibold">{invite.remaining_uses}</div>
           </div>
-          <div className="p-3">
+          <div className="min-w-0 p-3">
             <div className="label-mono">status</div>
             <div className="mt-1 font-mono text-sm font-semibold">
               {invite.is_active ? "active" : "disabled"}
@@ -848,7 +863,7 @@ function InviteSection({ slug }: { slug: string }) {
                         view all generated links
                       </Button>
                     </DialogTrigger>
-                    <DialogContent className="max-w-3xl">
+                    <DialogContent className="w-[calc(100vw-2rem)] max-w-3xl overflow-hidden">
                       <DialogHeader>
                         <DialogTitle>Generated invite links</DialogTitle>
                         <DialogDescription>
@@ -865,7 +880,7 @@ function InviteSection({ slug }: { slug: string }) {
             </div>
 
             <Dialog open={newInviteOpen} onOpenChange={setNewInviteOpen}>
-              <DialogContent className="max-w-xl">
+              <DialogContent className="w-[calc(100vw-2rem)] max-w-xl overflow-hidden">
                 <DialogHeader>
                   <DialogTitle>Invite link created</DialogTitle>
                   <DialogDescription>
