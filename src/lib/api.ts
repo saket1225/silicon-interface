@@ -208,6 +208,8 @@ export const api = {
       ttl_minutes?: number;
     },
   ) => call<Invite>("POST", `/api/v1/teams/${slug}/invites`, data),
+  disableInvite: (slug: string, inviteId: number) =>
+    call<Invite>("DELETE", `/api/v1/teams/${slug}/invites/${inviteId}`),
   teamInvitees: (slug: string, offset = 0, limit = 5) =>
     call<{ results: Invitee[]; total: number; has_more: boolean }>(
       "GET",

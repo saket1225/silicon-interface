@@ -206,6 +206,8 @@ export interface Invite {
   role: TeamRole;
   max_uses: number;
   uses: number;
+  remaining_uses: number;
+  is_active: boolean;
   expires_at: string;
   claimed_at: string | null;
   created_at: string;

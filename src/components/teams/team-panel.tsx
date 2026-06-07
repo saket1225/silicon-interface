@@ -685,15 +685,27 @@ function InviteesSection({ slug }: { slug: string }) {
 }
 
 function InviteSection({ slug }: { slug: string }) {
-  const [invite, setInvite] = React.useState<Invite | null>(null);
+  const [invites, setInvites] = React.useState<Invite[]>([]);
   const [email, setEmail] = React.useState("");
   const [maxUses, setMaxUses] = React.useState(5);
   const [busy, setBusy] = React.useState(false);
 
-  const make = (fn: () => Promise<void>) => async () => {
+  const loadInvites = React.useCallback(async () => {
+    const rows = await api.teamInvites(slug);
+    setInvites(rows.filter((i) => i.channel === "link"));
+  }, [slug]);
+
+  React.useEffect(() => {
+    const id = window.setTimeout(() => {
+      void loadInvites().catch((e) => toast.error(e instanceof ApiError ? e.message : String(e)));
+    }, 0);
+    return () => window.clearTimeout(id);
+  }, [loadInvites]);
+
+  const make = <Args extends unknown[]>(fn: (...args: Args) => Promise<void>) => async (...args: Args) => {
     setBusy(true);
     try {
-      await fn();
+      await fn(...args);
     } catch (e) {
       toast.error(e instanceof ApiError ? e.message : String(e));
     } finally {
@@ -702,8 +714,8 @@ function InviteSection({ slug }: { slug: string }) {
   };
 
   const createLink = make(async () => {
-    const inv = await api.createInvite(slug, { channel: "link", max_uses: maxUses });
-    setInvite(inv);
+    await api.createInvite(slug, { channel: "link", max_uses: maxUses });
+    await loadInvites();
   });
 
   const inviteByEmail = make(async () => {
@@ -716,9 +728,14 @@ function InviteSection({ slug }: { slug: string }) {
     setEmail("");
   });
 
-  const link = invite
-    ? `${typeof window === "undefined" ? "" : window.location.origin}/join/${invite.token}?code=${invite.code}`
-    : "";
+  const disableInvite = make(async (invite: Invite) => {
+    const updated = await api.disableInvite(slug, invite.id);
+    setInvites((prev) => prev.map((i) => (i.id === updated.id ? updated : i)));
+    toast.success("invite link disabled");
+  });
+
+  const inviteLink = (invite: Invite) =>
+    `${typeof window === "undefined" ? "" : window.location.origin}/join/${invite.token}?code=${invite.code}`;
 
   return (
     <Section title="invites">
@@ -751,34 +768,61 @@ function InviteSection({ slug }: { slug: string }) {
               </Button>
             </div>
 
-            {invite ? (
-              <div className="border bg-background">
-                <div className="flex items-center justify-between gap-2 border-b px-3 py-2">
-                  <span className="truncate font-mono text-xs">{link}</span>
-                  <Button
-                    size="icon"
-                    variant="ghost"
-                    onClick={() => {
-                      navigator.clipboard.writeText(link);
-                      toast.success("link copied");
-                    }}
-                    aria-label="copy invite link"
-                  >
-                    <Copy />
-                  </Button>
-                </div>
-                <div className="grid grid-cols-2 divide-x text-sm">
-                  <div className="p-3">
-                    <div className="label-mono">code</div>
-                    <div className="mt-1 font-mono text-xl font-semibold">{invite.code}</div>
-                  </div>
-                  <div className="p-3">
-                    <div className="label-mono">rotates after</div>
-                    <div className="mt-1 font-mono text-xl font-semibold">
-                      {invite.max_uses} {invite.max_uses === 1 ? "join" : "joins"}
+            {invites.length > 0 ? (
+              <div className="space-y-3">
+                {invites.map((invite) => {
+                  const link = inviteLink(invite);
+                  return (
+                    <div
+                      key={invite.id}
+                      className={cn(
+                        "border bg-background",
+                        !invite.is_active && "opacity-60",
+                      )}
+                    >
+                      <div className="flex items-center gap-2 border-b px-3 py-2">
+                        <span className="min-w-0 flex-1 truncate font-mono text-xs">{link}</span>
+                        <Button
+                          size="icon"
+                          variant="ghost"
+                          onClick={() => {
+                            navigator.clipboard.writeText(link);
+                            toast.success("link copied");
+                          }}
+                          aria-label="copy invite link"
+                        >
+                          <Copy />
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          disabled={busy || !invite.is_active}
+                          onClick={() => disableInvite(invite)}
+                        >
+                          disable
+                        </Button>
+                      </div>
+                      <div className="grid grid-cols-3 divide-x text-sm">
+                        <div className="p-3">
+                          <div className="label-mono">code</div>
+                          <div className="mt-1 font-mono text-xl font-semibold">{invite.code}</div>
+                        </div>
+                        <div className="p-3">
+                          <div className="label-mono">seats left</div>
+                          <div className="mt-1 font-mono text-xl font-semibold">
+                            {invite.remaining_uses}
+                          </div>
+                        </div>
+                        <div className="p-3">
+                          <div className="label-mono">status</div>
+                          <div className="mt-1 font-mono text-sm font-semibold">
+                            {invite.is_active ? "active" : "disabled"}
+                          </div>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
+                  );
+                })}
               </div>
             ) : (
               <div className="border border-dashed bg-background/50 p-4 text-sm text-muted-foreground">
