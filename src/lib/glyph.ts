@@ -1,5 +1,5 @@
 // Deterministic MarkSystem generator for Carbon, Silicon, and Team marks.
-// Ported from /Users/codanium/Downloads/MarkSystem.jsx.
+// Ported from /Users/codanium/Downloads/MarkSystem (1).jsx.
 
 const BG = "#EAE6DD";
 const FG = "#111111";
@@ -62,10 +62,6 @@ function mulberry32(a: number) {
   };
 }
 
-function charRng(ch: string, i: number, seed: number) {
-  return mulberry32((Math.imul((ch.codePointAt(0) ?? 0) + 7, 2654435761) ^ Math.imul(i + 1, 40503) ^ seed) >>> 0);
-}
-
 function buildDomain(n: number, pred: (r: number, c: number, cen: number, n: number) => boolean): DomainCell[] {
   const cen = (n - 1) / 2;
   const out: DomainCell[] = [];
@@ -78,92 +74,104 @@ function buildDomain(n: number, pred: (r: number, c: number, cen: number, n: num
   return out;
 }
 
-function tCarbon(rng: () => number, cell: DomainCell): CellType {
-  const r = rng();
-  if (cell.rad < 0.1) return r < 0.7 ? 1 : 4;
-  if (cell.rad < 1.6) {
-    if (r < 0.4) return 4;
-    if (r < 0.7) return 2;
-    return 1;
+const SOLID = 0;
+const DIN = 1;
+const DOUT = 2;
+const SPARSE = 3;
+const ALT = 4;
+const GAP = 5;
+
+function ringTreatment(next: () => number, ring: number): number {
+  const r = next();
+  if (ring <= 1) {
+    if (r < 0.5) return SOLID;
+    if (r < 0.85) return DIN;
+    return DOUT;
   }
-  if (r < 0.5) return 1;
-  if (r < 0.74) return 0;
-  if (r < 0.87) return 4;
-  return 2;
+  if (r < 0.26) return SOLID;
+  if (r < 0.44) return DIN;
+  if (r < 0.58) return DOUT;
+  if (r < 0.77) return SPARSE;
+  if (r < 0.9) return ALT;
+  return GAP;
 }
 
-function tSilicon(rng: () => number, cell: DomainCell, cen: number): CellType {
-  const r = rng();
-  const dr = Math.abs(cell.r - cen);
-  const dc = Math.abs(cell.c - cen);
-  const onDiag = Math.abs(dr - dc) < 0.01;
-  const onAxis = dr === 0 || dc === 0;
-  if (cell.rad < 0.1) return 1;
-  if (cell.rad < 1.6) return r < 0.5 ? 1 : 4;
-  if (onDiag) return r < 0.85 ? 1 : 4;
-  if (onAxis) return r < 0.75 ? 0 : 1;
-  return r < 0.6 ? 0 : r < 0.82 ? 2 : 4;
-}
-
-function tTeam(rng: () => number, cell: DomainCell): CellType {
-  const r = rng();
-  if (cell.rad < 0.1) return 1;
-  if (cell.rad < 1.6) {
-    if (r < 0.45) return 4;
-    if (r < 0.75) return 2;
-    return 1;
+function cellType(
+  treatment: number,
+  r: number,
+  c: number,
+  fillBias: number,
+  parity: number,
+  cellRng: () => number,
+): CellType {
+  switch (treatment) {
+    case SOLID:
+      return 1;
+    case DIN:
+      return 4;
+    case DOUT:
+      return 2;
+    case ALT:
+      return ((r + c) & 1) === parity ? 1 : 0;
+    case SPARSE:
+      return cellRng() < fillBias ? (cellRng() < 0.7 ? 1 : 4) : 0;
+    default:
+      return 0;
   }
-  if (r < 0.4) return 1;
-  if (r < 0.58) return 0;
-  if (r < 0.8) return 4;
-  return 2;
 }
 
 const FAM = {
   carbon: {
     n: 7,
     group: ORTHO,
-    pick: tCarbon,
     theme: "light",
     domain: buildDomain(7, (r, c, cen) => r <= cen && c <= cen),
   },
   silicon: {
     n: 7,
     group: DIAG,
-    pick: tSilicon,
     theme: "dark",
     domain: buildDomain(7, (r, c, cen, n) => r <= c && r <= n - 1 - c),
   },
   team: {
     n: 9,
     group: FULL8,
-    pick: tTeam,
     theme: "split",
     domain: buildDomain(9, (r, c, cen) => r <= cen && c <= cen && r <= c),
   },
 } satisfies Record<Family, {
   n: number;
   group: Transform[];
-  pick: (rng: () => number, cell: DomainCell, cen: number) => CellType;
   theme: "light" | "dark" | "split";
   domain: DomainCell[];
 }>;
 
 function buildGrid(text: string, fam: Family): CellType[][] {
   const config = FAM[fam];
-  const cen = (config.n - 1) / 2;
   const grid: CellType[][] = Array.from({ length: config.n }, () => Array<CellType>(config.n).fill(0));
   const source = (text || "?").slice(0, 28);
+  const chars = [...source];
+  if (chars.length === 0) return grid;
+
   const seed = fnv(source);
-  [...source].forEach((ch, i) => {
-    const rng = charRng(ch, i, seed);
-    const cell = config.domain[i < config.domain.length ? i : Math.floor(rng() * config.domain.length)];
-    const t = config.pick(rng, cell, cen);
+  const next = mulberry32(seed);
+  const fillBias = 0.42 + next() * 0.42;
+  const parity = next() < 0.5 ? 0 : 1;
+  const centerType: CellType = next() < 0.78 ? 1 : 0;
+  const maxRing = Math.round(Math.max(...config.domain.map((d) => d.rad)));
+  const ringTreatments = Array.from({ length: maxRing + 1 }, (_, ring) => ringTreatment(next, ring));
+  const count = Math.min(chars.length, config.domain.length);
+
+  for (let i = 0; i < count; i += 1) {
+    const cell = config.domain[i];
+    const ring = Math.round(cell.rad);
+    const cellRng = mulberry32((seed ^ Math.imul(cell.r + 1, 73856093) ^ Math.imul(cell.c + 1, 19349663)) >>> 0);
+    const t = ring === 0 ? centerType : cellType(ringTreatments[ring], cell.r, cell.c, fillBias, parity, cellRng);
     config.group.forEach(([fn, tt]) => {
       const [r2, c2] = fn(cell.r, cell.c, config.n);
       grid[r2][c2] = tt(t);
     });
-  });
+  }
   return grid;
 }
 
