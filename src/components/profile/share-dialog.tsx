@@ -21,7 +21,8 @@ const INK = "#1a1a1a"; // near-black
 const BORDER = "#d4cfc7"; // hairline
 const MUTED = "#666666";
 
-const QR_DISPLAY_SIZE = 200; // px in the dialog
+const QR_DISPLAY_SIZE = 200; // CSS px in the dialog
+const QR_RENDER_SIZE = 960; // backing pixels used for retina display + downloads
 const QR_LOGO_FRACTION = 0.22; // logo edge ÷ qr edge — tuned for level-H error correction
 
 /**
@@ -84,14 +85,14 @@ export function ShareDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[90vh] max-w-sm overflow-y-auto">
+      <DialogContent className="max-h-[90vh] w-[calc(100vw-2rem)] max-w-sm overflow-x-hidden overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Share your chat</DialogTitle>
           <DialogDescription>
             Scan to start a conversation with you.
           </DialogDescription>
         </DialogHeader>
-        <div className="flex flex-col items-center gap-3">
+        <div className="flex min-w-0 flex-col items-center gap-3">
           {/* QR on a beige card so it matches the rest of the interface. The
               inner padding keeps a clear quiet zone around the modules so
               scanners still pick it up reliably. */}
@@ -99,15 +100,16 @@ export function ShareDialog({
             <QRCodeCanvas
               ref={qrRef}
               value={link}
-              size={QR_DISPLAY_SIZE}
+              size={QR_RENDER_SIZE}
               bgColor={BG}
               fgColor={INK}
               level="H"
               marginSize={2}
+              style={{ width: QR_DISPLAY_SIZE, height: QR_DISPLAY_SIZE }}
               imageSettings={{
                 src: "/logo.png",
-                width: Math.round(QR_DISPLAY_SIZE * QR_LOGO_FRACTION),
-                height: Math.round(QR_DISPLAY_SIZE * QR_LOGO_FRACTION),
+                width: Math.round(QR_RENDER_SIZE * QR_LOGO_FRACTION),
+                height: Math.round(QR_RENDER_SIZE * QR_LOGO_FRACTION),
                 excavate: true,
                 crossOrigin: "anonymous",
               }}
@@ -154,14 +156,16 @@ function CardRow({
   copyLabel: string;
 }) {
   return (
-    <div className="w-full border bg-card">
+    <div className="min-w-0 w-full border bg-card">
       <div className="flex items-center gap-1.5 border-b px-3 py-1 label-mono text-[10px]">
         {icon}
         <span className="opacity-60">{label}</span>
       </div>
-      <div className="flex items-center justify-between gap-2 px-3 py-2">
-        <span className="truncate font-mono text-xs">{value}</span>
-        <Button size="icon" variant="ghost" aria-label={copyLabel} onClick={onCopy}>
+      <div className="flex min-w-0 items-center justify-between gap-2 px-3 py-2">
+        <span className="min-w-0 flex-1 overflow-hidden truncate whitespace-nowrap font-mono text-xs">
+          {value}
+        </span>
+        <Button size="icon" variant="ghost" aria-label={copyLabel} onClick={onCopy} className="shrink-0">
           <Copy />
         </Button>
       </div>
@@ -183,7 +187,7 @@ interface BuildArgs {
 /**
  * Render a high-resolution branded share card and trigger a PNG download.
  *
- * Layout (logical px, 2× device scale for retina-sharp output):
+ * Layout (logical px, 3× device scale for high-resolution output):
  *
  *   ┌─────────────────────────────────┐
  *   │                                 │
@@ -210,10 +214,10 @@ interface BuildArgs {
  */
 async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<void> {
   // Square card — same shape as social-share posters and printable cards.
-  const W = 720;
-  const H = 720;
-  const SCALE = 2;
-  const FRAME_INSET = 24;
+  const W = 1080;
+  const H = 1080;
+  const SCALE = 3;
+  const FRAME_INSET = 36;
 
   const canvas = document.createElement("canvas");
   canvas.width = W * SCALE;
@@ -240,32 +244,32 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
 
   // ---- Eyebrow: logo + wordmark, centered near the top
   const logo = await loadImage("/logo.png");
-  const logoH = 24;
+  const logoH = 36;
   const logoW = (logo.width / logo.height) * logoH;
   const wordmark = "Silicon Interface";
-  ctx.font = '500 13px "JetBrains Mono", ui-monospace, monospace';
+  ctx.font = '500 20px "JetBrains Mono", ui-monospace, monospace';
   const wordW = ctx.measureText(wordmark).width;
-  const eyebrowGap = 10;
+  const eyebrowGap = 16;
   const eyebrowTotalW = logoW + eyebrowGap + wordW;
   const eyebrowX = (W - eyebrowTotalW) / 2;
-  const eyebrowY = 64;
-  ctx.drawImage(logo, eyebrowX, eyebrowY - logoH + 4, logoW, logoH);
+  const eyebrowY = 96;
+  ctx.drawImage(logo, eyebrowX, eyebrowY - logoH + 6, logoW, logoH);
   ctx.fillStyle = INK;
   ctx.textAlign = "left";
   ctx.fillText(wordmark, eyebrowX + logoW + eyebrowGap, eyebrowY);
 
   // ---- QR — sits directly on the beige canvas, no card chrome around it
-  const qrSize = 380;
+  const qrSize = 570;
   const qrX = (W - qrSize) / 2;
-  const qrY = eyebrowY + 48;
+  const qrY = eyebrowY + 72;
   ctx.drawImage(qr, qrX, qrY, qrSize, qrSize);
 
   // ---- Divider: hairline with a brand glyph in the middle. The middle gap
   // is a subtle decorative beat that breaks the rule cleanly without needing
   // extra ornaments.
-  const dividerY = qrY + qrSize + 56;
-  const dividerHalfW = 80;
-  const dividerGap = 18;
+  const dividerY = qrY + qrSize + 84;
+  const dividerHalfW = 120;
+  const dividerGap = 26;
   ctx.strokeStyle = BORDER;
   ctx.beginPath();
   ctx.moveTo(W / 2 - dividerHalfW, dividerY + 0.5);
@@ -275,32 +279,32 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
   ctx.stroke();
   ctx.fillStyle = INK;
   ctx.beginPath();
-  ctx.arc(W / 2, dividerY + 0.5, 2.5, 0, Math.PI * 2);
+  ctx.arc(W / 2, dividerY + 0.5, 4, 0, Math.PI * 2);
   ctx.fill();
 
   // ---- Subtitle
   ctx.textAlign = "center";
   ctx.fillStyle = MUTED;
-  ctx.font = '500 13px "TikTok Sans", -apple-system, "Segoe UI", sans-serif';
-  ctx.fillText("scan to start a chat", W / 2, dividerY + 32);
+  ctx.font = '500 20px "TikTok Sans", -apple-system, "Segoe UI", sans-serif';
+  ctx.fillText("scan to start a chat", W / 2, dividerY + 48);
 
   // ---- Identity block: optional display name → Carbon ID → link
-  let cursorY = dividerY + 64;
+  let cursorY = dividerY + 96;
   if (name && name.trim()) {
     ctx.fillStyle = INK;
-    ctx.font = '600 22px "TikTok Sans", -apple-system, "Segoe UI", sans-serif';
+    ctx.font = '600 34px "TikTok Sans", -apple-system, "Segoe UI", sans-serif';
     ctx.fillText(name.trim(), W / 2, cursorY);
-    cursorY += 30;
+    cursorY += 44;
   }
 
   ctx.fillStyle = INK;
-  ctx.font = '600 16px "JetBrains Mono", ui-monospace, monospace';
+  ctx.font = '600 24px "JetBrains Mono", ui-monospace, monospace';
   ctx.fillText(carbonId, W / 2, cursorY);
-  cursorY += 28;
+  cursorY += 42;
 
   ctx.fillStyle = MUTED;
-  ctx.font = '500 12px "JetBrains Mono", ui-monospace, monospace';
-  const maxLinkW = W - FRAME_INSET * 2 - 32;
+  ctx.font = '500 18px "JetBrains Mono", ui-monospace, monospace';
+  const maxLinkW = W - FRAME_INSET * 2 - 48;
   ctx.fillText(truncateMid(link, ctx, maxLinkW), W / 2, cursorY);
 
   // ---- Trigger download. Same-origin canvases aren't tainted → toDataURL OK.
