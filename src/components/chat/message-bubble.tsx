@@ -75,6 +75,7 @@ interface Props {
   status?: MessageStatus;
   /** Photo URL for the sender — used when rendering the message-side avatar. */
   senderPhotoUrl?: string | null;
+  senderAvatarKind?: "carbon" | "silicon" | "system";
   /** Saved-contact display name for the sender, when the user set one. */
   senderDisplayName?: string | null;
   /** Click on the avatar/profile chip opens the sender's profile. */
@@ -111,6 +112,7 @@ export function MessageBubble({
   onTakeBack,
   status,
   senderPhotoUrl,
+  senderAvatarKind,
   senderDisplayName,
   onSenderClick,
   showTime = true,
@@ -217,7 +219,12 @@ export function MessageBubble({
               aria-label={senderDisplayName || senderHandle ? `${senderDisplayName || senderHandle} — profile` : "profile"}
               className="block transition-opacity hover:opacity-80"
             >
-              <IdAvatar seed={senderHandle || "?"} src={senderPhotoUrl} size={28} />
+              <IdAvatar
+                seed={senderHandle || "?"}
+                src={senderPhotoUrl}
+                size={28}
+                family={senderAvatarKind === "silicon" ? "silicon" : "carbon"}
+              />
             </button>
           )}
         </div>

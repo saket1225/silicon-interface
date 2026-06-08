@@ -1,24 +1,21 @@
 import { api } from "./api";
 import { glyphSvg } from "./glyph";
 
-/**
- * Deterministic Silicon glyph for a handle. Direct port of GlyphGenerator
- * (radial 7×7 grid of triangles/full/empty cells, character-by-character
- * progressive growth). Same handle always produces the same mark.
- */
-export function identiconSvg(seed: string, size = 256): string {
-  return glyphSvg(seed || "?", { size });
+export type MarkFamily = "carbon" | "silicon" | "team";
+
+export function identiconSvg(seed: string, size = 256, family: MarkFamily = "carbon"): string {
+  return glyphSvg(seed || "?", { size, family });
 }
 
 /**
- * Generate a new Carbon's jdenticon avatar from their Carbon ID, store it in the
+ * Generate a new Carbon's MarkSystem avatar from their Carbon ID, store it in the
  * `profile-icons/` tree in S3 via the presign flow, and point their profile at
  * it. Best-effort: never blocks sign-up — returns the stored key or null.
  * Requires an authenticated session (call after the session is set).
  */
 export async function generateAndStoreAvatar(carbonId: string): Promise<string | null> {
   try {
-    const svg = identiconSvg(carbonId, 256);
+    const svg = identiconSvg(carbonId, 256, "carbon");
     const blob = new Blob([svg], { type: "image/svg+xml" });
     const r = await api.presignUpload({
       mime: "image/svg+xml",

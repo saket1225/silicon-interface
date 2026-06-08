@@ -2,23 +2,24 @@
 
 import * as React from "react";
 
-import { identiconSvg } from "@/lib/avatar";
+import { identiconSvg, type MarkFamily } from "@/lib/avatar";
 import { cn } from "@/lib/utils";
 
-/** Square avatar: the uploaded photo if present, else a deterministic jdenticon
- *  derived from the handle (the same mark generated at sign-up). */
+/** Square avatar: uploaded photo if present, else a deterministic MarkSystem glyph. */
 export function IdAvatar({
   seed,
   src,
   size = 40,
+  family = "carbon",
   className,
 }: {
   seed: string;
   src?: string | null;
   size?: number;
+  family?: MarkFamily;
   className?: string;
 }) {
-  const svg = React.useMemo(() => identiconSvg(seed || "?", size), [seed, size]);
+  const svg = React.useMemo(() => identiconSvg(seed || "?", size, family), [seed, size, family]);
   const style = { width: size, height: size };
 
   if (src) {
