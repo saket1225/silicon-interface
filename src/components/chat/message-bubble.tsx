@@ -166,6 +166,13 @@ export function MessageBubble({
   // types whose `is_final` happens to be false (e.g. a media event).
   const mightStream =
     (event.type === "m.text" || event.type === "m.tts") && !event.is_final;
+  // §4c — flash the bubble briefly when its text is copied.
+  const [copyFlash, setCopyFlash] = React.useState(false);
+  const triggerCopyFlash = React.useCallback(() => {
+    setCopyFlash(false);
+    requestAnimationFrame(() => setCopyFlash(true));
+    window.setTimeout(() => setCopyFlash(false), 320);
+  }, []);
   // Prefer the sender's handle (carbon username == carbon_id, or silicon name);
   // fall back to the kind only if we don't have it (e.g. system events).
   const senderLabel = senderDisplayName?.trim()
@@ -254,6 +261,7 @@ export function MessageBubble({
             // message column wrapper so hovering anywhere on the block (bubble,
             // padding, label, time) reveals the actions — not just the text.
             "relative p-3 text-sm",
+            copyFlash && "copy-flash",
             redacted
               ? "border bg-muted text-muted-foreground italic"
               : isMine
@@ -295,6 +303,7 @@ export function MessageBubble({
               onForward={onForward}
               onDelete={onDelete}
               onTakeBack={onTakeBack}
+              onCopied={triggerCopyFlash}
             />
           )}
         </div>
@@ -365,6 +374,7 @@ function BubbleActions({
   onForward,
   onDelete,
   onTakeBack,
+  onCopied,
 }: {
   event: Event;
   isMine: boolean;
@@ -375,6 +385,7 @@ function BubbleActions({
   onForward?: (event: Event) => void;
   onDelete?: (event: Event) => void;
   onTakeBack?: (eventId: string, force?: boolean) => void;
+  onCopied?: () => void;
 }) {
   // 5-minute self-delete window only applies to my carbon-side messages.
   const within5Min =
@@ -385,8 +396,10 @@ function BubbleActions({
   const handleCopy = async () => {
     // §7.1 — copyText handles insecure contexts (LAN/http) with an execCommand
     // fallback and only resolves true on a real copy.
-    if (await copyText(textBody)) toast.success("text copied");
-    else toast.error("couldn't copy");
+    if (await copyText(textBody)) {
+      onCopied?.(); // §4c — flash the bubble
+      toast.success("text copied");
+    } else toast.error("couldn't copy");
   };
   // Media messages (voice/file/image/…) expose download here in the options
   // menu rather than inline next to the player.

@@ -359,11 +359,27 @@ summary,
   animation: receipt-fill 0.28s ease-out;
 }
 
+/* Delights §4c — copy flash: a brief invert pulse on a message bubble when its
+   text is copied, reusing the brand's inverted selection feel. */
+@keyframes copy-flash {
+  0%,
+  100% {
+    filter: none;
+  }
+  45% {
+    filter: invert(1);
+  }
+}
+.copy-flash {
+  animation: copy-flash 0.3s ease-out;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .silicon-activity-line,
   .silicon-activity-core span,
   .silicon-activity-copy::after,
-  .receipt-fill {
+  .receipt-fill,
+  .copy-flash {
     animation: none;
   }
   .page-enter,
