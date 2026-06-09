@@ -95,7 +95,12 @@ export function IdAvatar({
       aria-hidden
       onContextMenu={onContextMenu}
       style={style}
-      className={cn("inline-block shrink-0 overflow-hidden border", className)}
+      // §0e — a subtle "breathe" on hover. transform-only (no reflow); stilled
+      // under reduced-motion.
+      className={cn(
+        "inline-block shrink-0 overflow-hidden border motion-safe:transition-transform motion-safe:duration-300 motion-safe:hover:scale-[1.06]",
+        className,
+      )}
       dangerouslySetInnerHTML={{ __html: svg }}
     />
   );
