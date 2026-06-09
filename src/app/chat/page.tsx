@@ -88,6 +88,7 @@ function notificationDisplay(room: Room, contacts: Map<string, Contact>) {
 import { RoomList } from "@/components/chat/room-list";
 import { NewDirectDialog } from "@/components/chat/new-direct-dialog";
 import { RoomView } from "@/components/chat/room-view";
+import { CommandMenu } from "@/components/chat/command-menu";
 import { TeamFilterBar, EMPTY_FILTERS, type ChatFilters } from "@/components/teams/team-filter-bar";
 import { TeamPanel } from "@/components/teams/team-panel";
 import { IdAvatar } from "@/components/profile/id-avatar";
@@ -511,6 +512,8 @@ function ChatPageInner() {
 
   return (
     <>
+      {/* §7b — Cmd+K jump menu (rooms / people / dev). */}
+      <CommandMenu rooms={rooms} isStaff={carbon?.is_staff} />
       {/* Left column — filter bar + conversation list. Hidden on mobile when a
           conversation is open (Telegram-style single-pane on small screens). */}
       <aside
