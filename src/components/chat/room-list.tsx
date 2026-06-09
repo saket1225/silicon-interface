@@ -26,6 +26,8 @@ interface Props {
   /** Set when a file is being dragged over a row; we use it to switch into
    *  that room after a brief hold (see chat page). */
   hoverRoomId?: string | null;
+  /** §1d — rooms with a silicon mid-task; rendered with a faint shimmer. */
+  workingRoomIds?: Set<string>;
   onRoomDragEnter?: (roomId: string) => void;
   onRoomDragLeave?: (roomId: string) => void;
 }
@@ -40,6 +42,7 @@ export function RoomList({
   loading,
   className,
   hoverRoomId,
+  workingRoomIds,
   onRoomDragEnter,
   onRoomDragLeave,
 }: Props) {
@@ -67,6 +70,7 @@ export function RoomList({
           {rooms.map((r) => {
             const d = roomDisplay(r);
             const isHover = hoverRoomId === r.room_id;
+            const isWorking = workingRoomIds?.has(r.room_id) ?? false;
             const unread = r.unread_count ?? (r.unread ? 1 : 0);
             // The latest message is mine when its sender handle matches me — in
             // that case the right slot shows a send-status tick instead of a
@@ -114,14 +118,22 @@ export function RoomList({
                         : "hover:bg-secondary/60",
                   )}
                 >
-                  <IdAvatar
-                    seed={avatarSeed}
-                    src={avatarSrc}
-                    asciiSrc={avatarAscii}
-                    size={36}
-                    family={peer?.kind ?? "carbon"}
-                    className="mt-0.5"
-                  />
+                  <div className="relative mt-0.5 h-9 w-9 shrink-0">
+                    <IdAvatar
+                      seed={avatarSeed}
+                      src={avatarSrc}
+                      asciiSrc={avatarAscii}
+                      size={36}
+                      family={peer?.kind ?? "carbon"}
+                    />
+                    {/* §1d — a silicon is working in this room (even unopened). */}
+                    {isWorking ? (
+                      <span
+                        className="absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 animate-pulse border border-background bg-foreground motion-reduce:animate-none"
+                        title="a silicon is working here"
+                      />
+                    ) : null}
+                  </div>
                   <div className="min-w-0 flex-1 overflow-hidden">
                     <div className="grid min-w-0 grid-cols-[minmax(0,1fr)_3.75rem] items-center gap-2">
                       <span className="flex min-w-0 items-center gap-1.5 overflow-hidden">

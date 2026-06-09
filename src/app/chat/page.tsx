@@ -124,6 +124,35 @@ function ChatPageInner() {
   const teamViewSlug = search.get("team");
   const [rooms, setRooms] = React.useState<Room[]>([]);
   const [loading, setLoading] = React.useState(true);
+  // §1d — roomId → expiry timestamp for rooms with a silicon mid-task. Drives a
+  // faint sidebar "working…" shimmer even when the room isn't open.
+  const [workingRooms, setWorkingRooms] = React.useState<Record<string, number>>({});
+  const markRoomWorking = React.useCallback((roomId: string, working: boolean) => {
+    setWorkingRooms((prev) => {
+      if (working) return { ...prev, [roomId]: Date.now() + 45_000 };
+      if (!(roomId in prev)) return prev;
+      const next = { ...prev };
+      delete next[roomId];
+      return next;
+    });
+  }, []);
+  // Sweep expired entries so a silicon that died without a `done` stops shimmering.
+  React.useEffect(() => {
+    const id = window.setInterval(() => {
+      setWorkingRooms((prev) => {
+        const now = Date.now();
+        let changed = false;
+        const next: Record<string, number> = {};
+        for (const [k, v] of Object.entries(prev)) {
+          if (v > now) next[k] = v;
+          else changed = true;
+        }
+        return changed ? next : prev;
+      });
+    }, 5000);
+    return () => window.clearInterval(id);
+  }, []);
+  const workingRoomIds = React.useMemo(() => new Set(Object.keys(workingRooms)), [workingRooms]);
   const [dialogOpen, setDialogOpen] = React.useState(false);
   const [filters, setFilters] = React.useState<ChatFilters>(EMPTY_FILTERS);
   const [activeTeamTab, setActiveTeamTab] = React.useState<string>("");
@@ -439,6 +468,18 @@ function ChatPageInner() {
     } else if (f.type === "room.added") {
       if (!roomsRef.current.some((r) => r.room_id === f.room_id)) void refresh();
     }
+    // §1d — track which rooms have a silicon mid-task so the sidebar can shimmer
+    // them even when not open. Progress frames (and m.progress events) drive it.
+    const progressRoom = "room_id" in f ? f.room_id : null;
+    if (f.type === "progress" && progressRoom) {
+      if (f.state === "done") markRoomWorking(progressRoom, false);
+      else if (f.state) markRoomWorking(progressRoom, true);
+    } else if (f.type === "event" && f.event.type === "m.progress" && progressRoom) {
+      markRoomWorking(progressRoom, String(f.event.content.state) !== "done");
+    } else if (f.type === "event" && progressRoom && f.event.sender_kind === "silicon") {
+      // a real silicon message means it's done working in that room
+      markRoomWorking(progressRoom, false);
+    }
     };
   });
 
@@ -666,6 +707,7 @@ function ChatPageInner() {
           onNew={() => setDialogOpen(true)}
           loading={loading}
           hoverRoomId={hoverRoomId}
+          workingRoomIds={workingRoomIds}
           onRoomDragEnter={onRoomDragEnter}
           onRoomDragLeave={onRoomDragLeave}
         />
