@@ -28,12 +28,9 @@ export default function HomePage() {
         <Button asChild className="w-full">
           <Link href="/auth/login">Log in</Link>
         </Button>
-        <Link
-          href="/auth/register"
-          className="text-sm text-muted-foreground transition-colors hover:text-foreground"
-        >
-          Sign up
-        </Link>
+        <Button asChild variant="ghost" className="w-full text-muted-foreground">
+          <Link href="/auth/register">Sign up</Link>
+        </Button>
       </div>
     </main>
   );
