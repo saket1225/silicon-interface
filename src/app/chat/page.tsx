@@ -306,7 +306,11 @@ function ChatPageInner() {
     window.addEventListener("pointerup", onUp);
   }, [sidebarW]);
 
+  // §9b — true while a background rooms refetch is in flight (the list is
+  // served from cache instantly, then reconciled); drives a 1px top hairline.
+  const [refreshing, setRefreshing] = React.useState(false);
   const refresh = React.useCallback(async () => {
+    setRefreshing(true);
     try {
       const next = await api.rooms();
       setRooms(next);
@@ -316,6 +320,7 @@ function ChatPageInner() {
     } finally {
       roomsCacheOwnerRef.current = ownerId;
       setLoading(false);
+      setRefreshing(false);
     }
   }, [ownerId]);
 
@@ -597,6 +602,11 @@ function ChatPageInner() {
           selected || viewedTeam ? "hidden" : "flex",
         )}
       >
+        {/* §9b — a 1px top hairline pulses while the cached list reconciles in
+            the background, so power users know it's warming. */}
+        {refreshing ? (
+          <div className="pointer-events-none absolute inset-x-0 top-0 z-10 h-px animate-pulse bg-foreground/30 motion-reduce:animate-none" />
+        ) : null}
         {/* Drag handle — right edge, desktop only. */}
         <div
           onPointerDown={startResize}
