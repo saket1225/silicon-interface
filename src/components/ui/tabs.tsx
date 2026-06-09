@@ -44,12 +44,23 @@ TabsTrigger.displayName = TabsPrimitive.Trigger.displayName;
 const TabsContent = React.forwardRef<
   React.ElementRef<typeof TabsPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof TabsPrimitive.Content>
->(({ className, ...props }, ref) => (
+>(({ className, children, ...props }, ref) => (
   <TabsPrimitive.Content
     ref={ref}
-    className={cn("mt-3 focus-visible:outline-none", className)}
+    className={cn(
+      "mt-3 focus-visible:outline-none",
+      // §4d — "carriage return": the active panel slides in from the left like
+      // a fresh terminal line instead of cross-fading. Only the active panel is
+      // mounted/visible, so the keyframe fires on each tab change. Gated behind
+      // motion-safe so reduced-motion users get an instant swap.
+      "data-[state=active]:motion-safe:animate-[tab-carriage_0.18s_ease-out]",
+      className,
+    )}
     {...props}
-  />
+  >
+    <style>{"@keyframes tab-carriage{0%{transform:translateX(-0.6rem);opacity:0}100%{transform:translateX(0);opacity:1}}"}</style>
+    {children}
+  </TabsPrimitive.Content>
 ));
 TabsContent.displayName = TabsPrimitive.Content.displayName;
 
