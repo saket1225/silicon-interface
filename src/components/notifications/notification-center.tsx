@@ -153,8 +153,15 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
 
         <div className="max-h-[420px] overflow-y-auto">
           {items.length === 0 ? (
-            <div className="px-4 py-8 text-center text-sm text-muted-foreground">
-              No notifications yet.
+            <div className="px-4 py-8 text-center font-mono text-xs text-muted-foreground">
+              <span>&gt; inbox is quiet.</span>
+              {/* blinking caret — steps(1) hard blink, stilled under reduced-motion */}
+              <span
+                aria-hidden
+                className="ml-0.5 inline-block h-[1em] w-[0.55ch] translate-y-[0.12em] border-r border-current motion-reduce:animate-none"
+                style={{ animation: "qi-caret 0.9s steps(1, end) infinite" }}
+              />
+              <style>{"@keyframes qi-caret{0%,49%{opacity:1}50%,100%{opacity:0}}"}</style>
             </div>
           ) : (
             <ul className="divide-y">
