@@ -345,7 +345,7 @@ export function MessageBubble({
               isMine && "justify-end",
             )}
           >
-            {showTime && <span>{relativeTime(event.created_at)}</span>}
+            {showTime && <HoverTime iso={event.created_at} />}
             {showTime && isMine && status && <Receipt status={status} />}
             {mightStream && <StreamingPill body={String(event.content.body ?? "")} />}
           </div>
@@ -601,6 +601,31 @@ function StreamingPill({ body }: { body: string }) {
   }, [body]);
   if (idle) return null;
   return <span className="text-primary">streaming…</span>;
+}
+
+// §4b — hovering a relative time ("2m") reveals the absolute local time inline.
+function HoverTime({ iso }: { iso: string }) {
+  const [hover, setHover] = React.useState(false);
+  const absolute = React.useMemo(() => {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime())
+      ? ""
+      : d.toLocaleString(undefined, {
+          month: "short",
+          day: "numeric",
+          hour: "numeric",
+          minute: "2-digit",
+        });
+  }, [iso]);
+  return (
+    <span
+      className="cursor-default tabular-nums transition-opacity"
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      {hover && absolute ? absolute : relativeTime(iso)}
+    </span>
+  );
 }
 
 function Receipt({ status }: { status: MessageStatus }) {
