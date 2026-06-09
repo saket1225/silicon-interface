@@ -433,6 +433,14 @@ function MemberTab({
   );
 }
 
+// §8c — render seat usage as a fixed-width mono meter `[####------] 3/10`.
+function seatMeter(uses: number, maxUses: number): string {
+  if (!maxUses || maxUses < 0) return `${uses} · ∞`;
+  const width = 10;
+  const filled = Math.max(0, Math.min(width, Math.round((uses / maxUses) * width)));
+  return `[${"#".repeat(filled)}${"-".repeat(width - filled)}] ${uses}/${maxUses}`;
+}
+
 function fmtCents(cents: number, currency = "USD"): string {
   try {
     return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(cents / 100);
@@ -1010,8 +1018,11 @@ function InviteSection({ slug }: { slug: string }) {
             <div className="mt-1 font-mono text-xl font-semibold">{invite.code}</div>
           </div>
           <div className="min-w-0 p-3">
-            <div className="label-mono">seats left</div>
-            <div className="mt-1 font-mono text-xl font-semibold">{invite.remaining_uses}</div>
+            <div className="label-mono">seats</div>
+            {/* §8c — usage as a mono meter instead of a bare "seats left". */}
+            <div className="mt-1 truncate font-mono text-sm font-semibold tabular-nums">
+              {seatMeter(invite.uses, invite.max_uses)}
+            </div>
           </div>
           <div className="min-w-0 p-3">
             <div className="label-mono">status</div>
