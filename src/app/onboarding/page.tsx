@@ -54,6 +54,75 @@ const SCREENS: Screen[] = [
   },
 ];
 
+/** §6a — "Generating your mark". Plays a brief ring-by-ring "compile" of the
+ *  deterministic MarkSystem mark (the glyph domain is radius-sorted, so a
+ *  growing radial clip reveals it ring by ring), narrated with a mono
+ *  `> deriving your mark from carbon_id…` line, then snaps into place. Honors
+ *  prefers-reduced-motion by showing the final mark immediately. */
+function MarkReveal({ seed, size }: { seed: string; size: number }) {
+  // Discrete radial steps (% of the half-diagonal) so the reveal reads as
+  // distinct rings compiling outward rather than a smooth wipe.
+  const RING_STEPS = [0, 22, 40, 58, 76, 100];
+  const STEP_MS = 70;
+
+  const [revealPct, setRevealPct] = React.useState(0);
+  const [done, setDone] = React.useState(false);
+  const [reduced, setReduced] = React.useState(false);
+
+  React.useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    if (mq.matches) {
+      setReduced(true);
+      setRevealPct(100);
+      setDone(true);
+      return;
+    }
+    setReduced(false);
+    setRevealPct(0);
+    setDone(false);
+    let i = 0;
+    const id = window.setInterval(() => {
+      i += 1;
+      if (i >= RING_STEPS.length) {
+        window.clearInterval(id);
+        setDone(true);
+        return;
+      }
+      setRevealPct(RING_STEPS[i]);
+    }, STEP_MS);
+    return () => window.clearInterval(id);
+    // RING_STEPS/STEP_MS are module-stable; re-run only when the seed changes.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed]);
+
+  const compiling = !reduced && !done;
+
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <div className="relative" style={{ width: size, height: size }}>
+        <div
+          className={done && !reduced ? "mark-snap" : undefined}
+          style={{
+            clipPath: reduced
+              ? undefined
+              : `circle(${revealPct}% at 50% 50%)`,
+            transition: "clip-path 60ms linear",
+          }}
+        >
+          <IdAvatar seed={seed} src={null} size={size} />
+        </div>
+      </div>
+      <p
+        className="label-mono text-[10px] text-muted-foreground"
+        aria-live="polite"
+        style={{ visibility: compiling ? "visible" : "hidden" }}
+      >
+        &gt; deriving your mark from carbon_id…
+      </p>
+    </div>
+  );
+}
+
 function nameFromCarbonId(cid: string): string {
   if (!cid) return "";
   const cleaned = cid.replace(/[^a-zA-Z]/g, "");
@@ -355,7 +424,7 @@ function OnboardingInner() {
                     className="h-32 w-32 border object-cover"
                   />
                 ) : (
-                  <IdAvatar seed={carbonId || "?"} src={null} size={132} />
+                  <MarkReveal seed={carbonId || "?"} size={132} />
                 )}
                 <input
                   ref={photoInputRef}
@@ -484,9 +553,25 @@ function OnboardingInner() {
         .cid-flash {
           animation: cid-flash 0.5s ease-out;
         }
+        /* §6a — the satisfying snap once the rings finish compiling. */
+        @keyframes mark-snap {
+          0% {
+            transform: scale(0.92);
+          }
+          55% {
+            transform: scale(1.05);
+          }
+          100% {
+            transform: scale(1);
+          }
+        }
+        .mark-snap {
+          animation: mark-snap 0.32s cubic-bezier(0.2, 0.8, 0.2, 1) both;
+        }
         @media (prefers-reduced-motion: reduce) {
           .cid-pop,
-          .cid-flash {
+          .cid-flash,
+          .mark-snap {
             animation: none;
           }
         }
