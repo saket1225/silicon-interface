@@ -283,6 +283,38 @@ function newClientId(): string {
   return `${Date.now()}-${Math.random().toString(36).slice(2)}`;
 }
 
+// Delights §7a/§7e — terminal-flavored slash commands. `handled` means the
+// command was fully dealt with locally (clear the input, don't send);
+// `replaceWith` transforms the outgoing message and lets it send.
+const SLASH_HELP = "/shrug · /me <action> · /clear · /sudo";
+function runSlashCommand(body: string): {
+  handled: boolean;
+  replaceWith?: string;
+  clearReply?: boolean;
+} {
+  const space = body.indexOf(" ");
+  const cmd = (space < 0 ? body.slice(1) : body.slice(1, space)).toLowerCase();
+  const arg = space < 0 ? "" : body.slice(space + 1).trim();
+  switch (cmd) {
+    case "shrug":
+      return { handled: false, replaceWith: `${arg ? `${arg} ` : ""}¯\\_(ツ)_/¯` };
+    case "me":
+      // classic action message — rendered italic by our inline markdown
+      return arg ? { handled: false, replaceWith: `_${arg}_` } : { handled: true };
+    case "clear":
+      return { handled: true, clearReply: true };
+    case "sudo":
+      toast.error("permission denied"); // §7e — the xkcd sandwich
+      return { handled: true };
+    case "help":
+    case "?":
+      toast.message("commands", { description: SLASH_HELP });
+      return { handled: true };
+    default:
+      return { handled: false }; // unknown — send the "/…" text literally
+  }
+}
+
 export function Composer({
   roomId,
   onOptimisticAdd,
@@ -735,7 +767,19 @@ export function Composer({
   };
 
   const send = async () => {
-    const body = text.trim();
+    let body = text.trim();
+
+    // §7a/§7e — slash command palette (text only; a "/" with a file is a caption).
+    if (!file && body.startsWith("/")) {
+      const result = runSlashCommand(body);
+      if (result.handled) {
+        setText("");
+        persistDraft("");
+        if (result.clearReply) onClearReply?.();
+        return;
+      }
+      if (result.replaceWith !== undefined) body = result.replaceWith; // transform + send
+    }
 
     // File path — the upload already started on attach. Post once it's ready
     // (the send button stays disabled until then).
