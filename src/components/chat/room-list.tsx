@@ -11,6 +11,7 @@ import { cn, relativeTime } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { IdAvatar } from "@/components/profile/id-avatar";
+import { GlyphSkeleton } from "@/components/ui/glyph-skeleton";
 
 interface Props {
   rooms: Room[];
@@ -65,7 +66,9 @@ export function RoomList({
       <ScrollArea className="flex-1">
         <ul className="divide-y">
           {loading && (
-            <li className="py-6 pl-6 pr-4 text-sm text-muted-foreground">loading…</li>
+            <li>
+              <GlyphSkeleton />
+            </li>
           )}
           {rooms.map((r) => {
             const d = roomDisplay(r);
