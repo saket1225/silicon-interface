@@ -8,10 +8,13 @@ import {
   browserNotificationPermission,
   clearNotifications,
   loadNotifications,
+  loadUnreadCount,
   markAllNotificationsRead,
   markNotificationRead,
   NOTIFICATION_EVENT,
+  NOTIFICATION_NAVIGATE_EVENT,
   requestBrowserNotifications,
+  trimmedCount,
   type InterfaceNotification,
 } from "@/lib/notifications";
 import { cn, relativeTime } from "@/lib/utils";
@@ -24,13 +27,23 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
   const router = useRouter();
   const [open, setOpen] = React.useState(false);
   const [items, setItems] = React.useState<InterfaceNotification[]>([]);
+  // Unread is read from the decoupled store counter, not derived from `items`,
+  // so it stays accurate even when older unread notifications fall out of the
+  // kept window. `trimmed` drives the "showing latest N" affordance.
+  const [unread, setUnread] = React.useState(0);
+  const [trimmed, setTrimmed] = React.useState(0);
   const [permission, setPermission] = React.useState<NotificationPermission | "unsupported">("unsupported");
 
   const reload = React.useCallback(() => {
     setItems(loadNotifications(ownerId));
+    setUnread(loadUnreadCount(ownerId));
+    setTrimmed(trimmedCount(ownerId));
   }, [ownerId]);
 
   React.useEffect(() => {
+    // Mount-time read of client-only browser state (Notification permission +
+    // localStorage-backed notifications).
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- client-only hydration on mount
     setPermission(browserNotificationPermission());
     reload();
   }, [reload]);
@@ -40,18 +53,26 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
       const detail = (event as CustomEvent<{ ownerId?: string }>).detail;
       if (!detail?.ownerId || detail.ownerId === ownerId) reload();
     };
+    // Cross-tab: only react to *this* owner's key. The previous prefix match
+    // reloaded on any owner's notifications, so a second account in another tab
+    // would churn this list.
     const onStorage = (event: StorageEvent) => {
-      if (event.key?.startsWith("silicon-interface:notifications:")) reload();
+      if (event.key === `silicon-interface:notifications:${encodeURIComponent(ownerId)}`) reload();
+    };
+    // Soft route when an OS notification is clicked — keeps the live socket.
+    const onNavigate = (event: Event) => {
+      const detail = (event as CustomEvent<{ roomId?: string }>).detail;
+      if (detail?.roomId) router.push(`/chat?room=${encodeURIComponent(detail.roomId)}`);
     };
     window.addEventListener(NOTIFICATION_EVENT, onChanged);
     window.addEventListener("storage", onStorage);
+    window.addEventListener(NOTIFICATION_NAVIGATE_EVENT, onNavigate);
     return () => {
       window.removeEventListener(NOTIFICATION_EVENT, onChanged);
       window.removeEventListener("storage", onStorage);
+      window.removeEventListener(NOTIFICATION_NAVIGATE_EVENT, onNavigate);
     };
-  }, [ownerId, reload]);
-
-  const unread = items.filter((item) => !item.read).length;
+  }, [ownerId, reload, router]);
 
   const openRoom = (item: InterfaceNotification) => {
     markNotificationRead(ownerId, item.id);
@@ -168,6 +189,11 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
               ))}
             </ul>
           )}
+          {trimmed > 0 ? (
+            <div className="border-t px-4 py-2 text-center text-[10px] text-muted-foreground">
+              showing latest {items.length} · {trimmed} older not shown
+            </div>
+          ) : null}
         </div>
       </PopoverContent>
     </Popover>

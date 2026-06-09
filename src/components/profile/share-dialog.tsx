@@ -5,6 +5,8 @@ import { QRCodeCanvas } from "qrcode.react";
 import { Copy, DownloadSimple, LinkSimple } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
+import { copyText } from "@/lib/clipboard";
+
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -58,13 +60,15 @@ export function ShareDialog({
   // some Vercel edge cache states.
   const qrRef = React.useRef<HTMLCanvasElement>(null);
 
-  const copyLink = () => {
-    navigator.clipboard.writeText(link);
-    toast.success("link copied");
+  // QA §7.1: route every copy through the never-lies helper and only toast
+  // success on a real copy; otherwise tell the user it failed.
+  const copyLink = async () => {
+    if (await copyText(link)) toast.success("link copied");
+    else toast.error("couldn't copy — copy it manually");
   };
-  const copyId = () => {
-    navigator.clipboard.writeText(carbonId);
-    toast.success("Carbon ID copied");
+  const copyId = async () => {
+    if (await copyText(carbonId)) toast.success("Carbon ID copied");
+    else toast.error("couldn't copy — copy it manually");
   };
 
   const download = async () => {
@@ -219,6 +223,19 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
   const SCALE = 3;
   const FRAME_INSET = 36;
 
+  // Wait for the brand webfonts (JetBrains Mono / TikTok Sans) to finish
+  // loading before measuring/drawing. Canvas text falls back to a system font
+  // if the face isn't ready yet, producing an off-brand card whose measured
+  // widths (used for centering + truncation) are wrong too. `document.fonts`
+  // is widely supported; guard it just in case.
+  if (typeof document !== "undefined" && document.fonts?.ready) {
+    try {
+      await document.fonts.ready;
+    } catch {
+      /* draw with whatever's available rather than fail the export */
+    }
+  }
+
   const canvas = document.createElement("canvas");
   canvas.width = W * SCALE;
   canvas.height = H * SCALE;
@@ -243,17 +260,23 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
   );
 
   // ---- Eyebrow: logo + wordmark, centered near the top
-  const logo = await loadImage("/logo.png");
+  // QA medium: if `/logo.png` is served from a CDN that doesn't return CORS
+  // headers, drawing it taints the canvas and the later `toDataURL` throws a
+  // SecurityError that aborts the whole export. The logo is decorative, so we
+  // load it best-effort and fall back to wordmark-only rather than risk the
+  // download. (loadImage already requests crossOrigin="anonymous"; a clean CDN
+  // keeps the canvas exportable, a misconfigured one just drops the glyph.)
+  const logo = await loadImage("/logo.png").catch(() => null);
   const logoH = 36;
-  const logoW = (logo.width / logo.height) * logoH;
+  const logoW = logo ? (logo.width / logo.height) * logoH : 0;
   const wordmark = "Silicon Interface";
   ctx.font = '500 20px "JetBrains Mono", ui-monospace, monospace';
   const wordW = ctx.measureText(wordmark).width;
-  const eyebrowGap = 16;
+  const eyebrowGap = logo ? 16 : 0;
   const eyebrowTotalW = logoW + eyebrowGap + wordW;
   const eyebrowX = (W - eyebrowTotalW) / 2;
   const eyebrowY = 96;
-  ctx.drawImage(logo, eyebrowX, eyebrowY - logoH + 6, logoW, logoH);
+  if (logo) ctx.drawImage(logo, eyebrowX, eyebrowY - logoH + 6, logoW, logoH);
   ctx.fillStyle = INK;
   ctx.textAlign = "left";
   ctx.fillText(wordmark, eyebrowX + logoW + eyebrowGap, eyebrowY);
@@ -289,26 +312,38 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
   ctx.fillText("scan to start a chat", W / 2, dividerY + 48);
 
   // ---- Identity block: optional display name → Carbon ID → link
+  // QA medium: a long name or carbonId overflowed the card edge — the prior
+  // fix only truncated the link. Clamp each line to the inner content width.
+  const maxIdentityW = W - FRAME_INSET * 2 - 48;
   let cursorY = dividerY + 96;
   if (name && name.trim()) {
     ctx.fillStyle = INK;
     ctx.font = '600 34px "TikTok Sans", -apple-system, "Segoe UI", sans-serif';
-    ctx.fillText(name.trim(), W / 2, cursorY);
+    ctx.fillText(truncateEnd(name.trim(), ctx, maxIdentityW), W / 2, cursorY);
     cursorY += 44;
   }
 
   ctx.fillStyle = INK;
   ctx.font = '600 24px "JetBrains Mono", ui-monospace, monospace';
-  ctx.fillText(carbonId, W / 2, cursorY);
+  ctx.fillText(truncateEnd(carbonId, ctx, maxIdentityW), W / 2, cursorY);
   cursorY += 42;
 
   ctx.fillStyle = MUTED;
   ctx.font = '500 18px "JetBrains Mono", ui-monospace, monospace';
-  const maxLinkW = W - FRAME_INSET * 2 - 48;
-  ctx.fillText(truncateMid(link, ctx, maxLinkW), W / 2, cursorY);
+  ctx.fillText(truncateMid(link, ctx, maxIdentityW), W / 2, cursorY);
 
-  // ---- Trigger download. Same-origin canvases aren't tainted → toDataURL OK.
-  const dataUrl = canvas.toDataURL("image/png");
+  // ---- Trigger download. A same-origin /logo.png keeps the canvas clean; if
+  // it's served cross-origin without CORS, the embedded logo (in the QR and/or
+  // eyebrow) taints the canvas and toDataURL throws a SecurityError. Translate
+  // that into an actionable message instead of leaking the raw DOMException.
+  let dataUrl: string;
+  try {
+    dataUrl = canvas.toDataURL("image/png");
+  } catch {
+    throw new Error(
+      "couldn't export the share card — the logo is blocking it. Try the copy-link button instead.",
+    );
+  }
   const a = document.createElement("a");
   a.href = dataUrl;
   a.download = `silicon-interface-${carbonId}.png`;
@@ -325,6 +360,19 @@ function loadImage(src: string): Promise<HTMLImageElement> {
     img.onerror = reject;
     img.src = src;
   });
+}
+
+/** Trim with a trailing ellipsis so a too-long single line fits its column. */
+function truncateEnd(s: string, ctx: CanvasRenderingContext2D, maxW: number): string {
+  if (ctx.measureText(s).width <= maxW) return s;
+  let lo = 0;
+  let hi = s.length;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (ctx.measureText(`${s.slice(0, mid)}…`).width <= maxW) lo = mid;
+    else hi = mid;
+  }
+  return `${s.slice(0, lo)}…`;
 }
 
 /** Trim with ellipsis in the middle so the link's start + end stay visible. */

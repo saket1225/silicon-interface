@@ -187,8 +187,28 @@ export const COUNTRY_CODES: Country[] = [
 
 const BY_ISO = new Map(COUNTRY_CODES.map((c) => [c.iso2, c]));
 
+// Preferred country when a dial code is shared by several countries. Without
+// this, a first-match scan over the alphabetically-ordered list resolves "+1"
+// to Barbados (BB) rather than the US, and "+7" could land on KZ instead of RU.
+// We bias to the most populous / most-likely-typed member so a bare "+1 415…"
+// paste keeps the US flag. Keyed by dial string (digits only).
+const PREFERRED_BY_DIAL: Record<string, string> = {
+  "1": "US",
+  "7": "RU",
+};
+
 export function findCountry(iso2: string): Country | undefined {
   return BY_ISO.get(iso2.toUpperCase());
+}
+
+/** The country to attribute a dial code to, honouring the shared-code bias. */
+function countryForDial(dial: string): Country | undefined {
+  const preferred = PREFERRED_BY_DIAL[dial];
+  if (preferred) {
+    const c = BY_ISO.get(preferred);
+    if (c) return c;
+  }
+  return COUNTRY_CODES.find((c) => c.dial === dial);
 }
 
 /** Regional-indicator flag emoji from an ISO-3166-1 alpha-2 code. */
@@ -206,11 +226,84 @@ export function iso2ToFlag(iso2: string): string {
 export function parseE164(e164: string): { country: Country; number: string } | null {
   if (!e164 || !e164.startsWith("+")) return null;
   const digits = e164.slice(1).replace(/\D/g, "");
-  const byDialLen = [...COUNTRY_CODES].sort((a, b) => b.dial.length - a.dial.length);
-  for (const c of byDialLen) {
-    if (digits.startsWith(c.dial)) return { country: c, number: digits.slice(c.dial.length) };
+  // Try longest dial codes first so multi-digit codes (e.g. +44) beat shorter
+  // prefix collisions. For each matching prefix length, resolve to the
+  // preferred country (US over BB for "+1", RU over KZ for "+7") via
+  // countryForDial rather than first-in-list.
+  const dialLens = Array.from(new Set(COUNTRY_CODES.map((c) => c.dial.length))).sort(
+    (a, b) => b - a,
+  );
+  for (const len of dialLens) {
+    const prefix = digits.slice(0, len);
+    const c = countryForDial(prefix);
+    if (c && digits.startsWith(c.dial)) {
+      return { country: c, number: digits.slice(c.dial.length) };
+    }
   }
   return null;
+}
+
+/**
+ * Normalize a pasted phone number against a currently-selected country.
+ *
+ * Users paste numbers in wildly different shapes, and the naive
+ * `+${dial}${typed}` concatenation in the forms double-prefixes or produces
+ * invalid E.164:
+ *   - Pasting "+1 415 555 1212" while US is selected → "+114155551212" (the
+ *     dial code appears twice). We detect a pasted leading "+" / matching
+ *     country code and strip it so only the national part remains.
+ *   - Pasting a UK "07911 123456" (national trunk "0") → "+44 07911123456",
+ *     which is invalid; the trunk "0" must be dropped when an international
+ *     code is prepended. We strip a single leading "0".
+ *
+ * Returns `{ country, number }` where `number` is the local digits to put in
+ * the input. If the paste carries its own "+<code>", `country` may switch to
+ * match (so pasting a foreign number while US is selected resolves correctly).
+ */
+export function normalizePhonePaste(
+  raw: string,
+  current: Country,
+): { country: Country; number: string } {
+  const trimmed = raw.trim();
+
+  // Case 1: an explicit international number ("+…" or "00…" IDD prefix).
+  // Re-derive the country from the pasted code rather than trusting the
+  // currently-selected one, then keep just the national remainder.
+  const intl = trimmed.startsWith("+")
+    ? trimmed
+    : /^00\d/.test(trimmed.replace(/[\s()-]/g, ""))
+      ? "+" + trimmed.replace(/[\s()-]/g, "").slice(2)
+      : null;
+  if (intl) {
+    const parsed = parseE164(intl);
+    if (parsed) return parsed;
+    // Unknown code: fall back to stripping a leading "+" so we don't double it.
+    return { country: current, number: trimmed.replace(/\D/g, "") };
+  }
+
+  // Case 2: bare national digits. The selected country supplies the code.
+  let digits = trimmed.replace(/\D/g, "");
+
+  // Case 2a: the paste accidentally includes the current dial code with no "+"
+  // (e.g. selected US and pasted "1 415 555 1212", or selected UK and pasted
+  // "44 7911 123456"). Strip a single leading copy — but only when the leftover
+  // is still a plausible national number (>= 6 digits). This guards against
+  // mangling a legitimately leading-with-dial-digit national number (a real US
+  // number can't start with country code 1 anyway, but other regions' leading
+  // digits could coincide with their own code).
+  if (
+    current.dial &&
+    digits.startsWith(current.dial) &&
+    digits.length - current.dial.length >= 6
+  ) {
+    digits = digits.slice(current.dial.length);
+  }
+
+  // Case 2b: drop a single national trunk "0" (UK/DE/FR/… write local numbers
+  // with a leading 0 that is omitted in international form).
+  if (digits.startsWith("0")) digits = digits.replace(/^0+/, "");
+
+  return { country: current, number: digits };
 }
 
 /**

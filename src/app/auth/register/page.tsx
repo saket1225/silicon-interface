@@ -3,16 +3,21 @@
 import * as React from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { ArrowLeft, Check, CircleNotch, Warning, X } from "@phosphor-icons/react/dist/ssr";
+import { ArrowLeft, Check, CircleNotch, Warning } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
-import { track } from "@/lib/analytics";
 import { useResendCooldown } from "@/lib/use-resend";
-import { findCountry, guessCountryIso2, parseE164, type Country } from "@/lib/country-codes";
-import { isValidEmail, looksLikeWorkEmail, suggestCarbonId } from "@/lib/email";
-import { generateAndStoreAvatar } from "@/lib/avatar";
+import {
+  findCountry,
+  guessCountryIso2,
+  normalizePhonePaste,
+  parseE164,
+  type Country,
+} from "@/lib/country-codes";
+import { isValidEmail, looksLikeWorkEmail } from "@/lib/email";
+import { safeSession } from "@/lib/safe-storage";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -27,14 +32,10 @@ import {
 import { CountryCodeSelect } from "@/components/auth/country-code-select";
 import { OtpDialog } from "@/components/auth/otp-dialog";
 
-type Step = "email" | "phone" | "carbonid";
-type Avail =
-  | { state: "idle" }
-  | { state: "checking" }
-  | { state: "ok" }
-  | { state: "bad"; reason: string };
-
-const CARBON_ID_RE = /^[a-z0-9_.-]{3,32}$/;
+// Carbon-ID picking + the final registerUsername call live in the personalized
+// /onboarding flow (entered after phone verify). Register only owns the two
+// verification steps, so there's no "carbonid" step here anymore.
+type Step = "email" | "phone";
 
 // Suspense wrapper so `useSearchParams()` (email/phone/notice handoff from
 // /login) doesn't blow up static prerender.
@@ -72,7 +73,8 @@ function RegisterPageInner() {
   const [emailVerified, setEmailVerified] = React.useState(false);
   const [emailDialog, setEmailDialog] = React.useState(false);
   const [nudge, setNudge] = React.useState(false);
-  const emailResend = useResendCooldown();
+  // Persist across refresh so a reload on the OTP dialog keeps the throttle.
+  const emailResend = useResendCooldown({ persistKey: "silicon-interface:resend:register-email" });
 
   const [country, setCountry] = React.useState<Country>(
     () => initialPhone?.country ?? findCountry(guessCountryIso2()) ?? findCountry("US")!,
@@ -80,43 +82,9 @@ function RegisterPageInner() {
   const [number, setNumber] = React.useState(() => initialPhone?.number ?? "");
   const [phoneVerified, setPhoneVerified] = React.useState(false);
   const [phoneDialog, setPhoneDialog] = React.useState(false);
-  const phoneResend = useResendCooldown();
-
-  const [carbonId, setCarbonId] = React.useState("");
-  const [remote, setRemote] = React.useState<{
-    for: string;
-    available: boolean;
-    reason: string;
-  } | null>(null);
+  const phoneResend = useResendCooldown({ persistKey: "silicon-interface:resend:register-phone" });
 
   const phoneE164 = number ? `+${country.dial}${number.replace(/\D/g, "")}` : "";
-
-  // Carbon-ID availability is derived; the effect only fires the (debounced)
-  // server check and stores its result — no synchronous state churn.
-  const cid = carbonId.trim().toLowerCase();
-  const formatValid = CARBON_ID_RE.test(cid);
-  React.useEffect(() => {
-    if (!cid || !formatValid) return;
-    const t = setTimeout(async () => {
-      try {
-        const r = await api.carbonIdAvailable(cid);
-        setRemote({ for: cid, available: r.valid && r.available, reason: r.reason });
-      } catch {
-        /* leave prior result; UI shows "checking" until a result lands */
-      }
-    }, 350);
-    return () => clearTimeout(t);
-  }, [cid, formatValid]);
-
-  const avail: Avail = !cid
-    ? { state: "idle" }
-    : !formatValid
-      ? { state: "bad", reason: "3-32 chars: a-z 0-9 _ . -" }
-      : remote?.for === cid
-        ? remote.available
-          ? { state: "ok" }
-          : { state: "bad", reason: remote.reason || "already taken" }
-        : { state: "checking" };
 
   const goLogin = (id: string) =>
     router.push(
@@ -216,17 +184,13 @@ function RegisterPageInner() {
         toast.success("phone verified");
         // #1 — Both factors are done; hand off to the personalized onboarding
         // flow which handles Carbon-ID picking, name+bio, glyph generation,
-        // and the final registerUsername call.
-        window.sessionStorage.setItem(
-          "silicon-interface:onboarding-flow",
-          flowId,
-        );
+        // and the final registerUsername call. P0-6: use safeSession so a
+        // private-mode storage throw can't strand the user in a register↔
+        // onboarding bounce.
+        safeSession.set("silicon-interface:onboarding-flow", flowId);
         // Carry the verified email through so onboarding can pre-fill the
         // Carbon ID suggestion (local-part, normalised).
-        window.sessionStorage.setItem(
-          "silicon-interface:onboarding-email",
-          email.trim(),
-        );
+        safeSession.set("silicon-interface:onboarding-email", email.trim());
         router.replace("/onboarding");
       }
     });
@@ -236,18 +200,6 @@ function RegisterPageInner() {
       await api.registerPhoneStart(phoneE164, flowId || undefined);
       phoneResend.send();
       toast.success("code resent");
-    });
-
-  // ---- finalize ----
-  const finalize = () =>
-    wrap(async () => {
-      const session = await api.registerUsername(flowId, carbonId.trim().toLowerCase());
-      authStore.setSession(session);
-      track.signedUp({ method: "register" });
-      // Generate + store the new Carbon's avatar; never block entry on it.
-      await generateAndStoreAvatar(session.carbon.carbon_id);
-      toast.success(`welcome, @${session.carbon.username}`);
-      router.replace("/chat");
     });
 
   if (authed) {
@@ -337,6 +289,16 @@ function RegisterPageInner() {
                 placeholder="555 123 4567"
                 value={number}
                 onChange={(e) => setNumber(e.target.value)}
+                onPaste={(e) => {
+                  // Normalize pasted E.164/international input so we don't
+                  // double the country code or keep a national trunk "0".
+                  const text = e.clipboardData.getData("text");
+                  if (!text.trim()) return;
+                  e.preventDefault();
+                  const { country: c, number: n } = normalizePhonePaste(text, country);
+                  setCountry(c);
+                  setNumber(n);
+                }}
                 onKeyDown={(e) => e.key === "Enter" && number.trim() && submitPhone()}
               />
             </div>
@@ -344,39 +306,6 @@ function RegisterPageInner() {
           <Button onClick={submitPhone} disabled={!number.trim() || loading} className="w-full">
             {loading && <CircleNotch className="animate-spin" />}
             Get OTP
-          </Button>
-        </section>
-      )}
-
-      {step === "carbonid" && (
-        <section className="space-y-4">
-          <div className="space-y-4">
-            <Label htmlFor="carbonid">choose your Carbon ID</Label>
-            <div className="flex items-center border border-input bg-transparent focus-within:border-ring">
-              <span className="pl-3 text-muted-foreground">@</span>
-              <input
-                id="carbonid"
-                autoFocus
-                value={carbonId}
-                onChange={(e) => setCarbonId(e.target.value.toLowerCase())}
-                onKeyDown={(e) => e.key === "Enter" && avail.state === "ok" && finalize()}
-                className="h-9 w-full min-w-0 bg-transparent px-1.5 text-sm outline-none"
-              />
-              <span className="px-3">
-                <AvailMark avail={avail} />
-              </span>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {avail.state === "bad" ? (
-                <span className="text-destructive">{avail.reason}</span>
-              ) : (
-                "This is how Carbons and Silicons find you. Lowercase letters, digits, _ . -"
-              )}
-            </p>
-          </div>
-          <Button onClick={finalize} disabled={avail.state !== "ok" || loading} className="w-full">
-            {loading && <CircleNotch className="animate-spin" />}
-            finish &amp; enter
           </Button>
         </section>
       )}
@@ -445,14 +374,6 @@ function RegisterPageInner() {
       />
     </div>
   );
-}
-
-function AvailMark({ avail }: { avail: Avail }) {
-  if (avail.state === "checking")
-    return <CircleNotch className="h-4 w-4 animate-spin text-muted-foreground" />;
-  if (avail.state === "ok") return <Check className="h-4 w-4 text-[var(--success)]" />;
-  if (avail.state === "bad") return <X className="h-4 w-4 text-destructive" />;
-  return null;
 }
 
 function Stepper({

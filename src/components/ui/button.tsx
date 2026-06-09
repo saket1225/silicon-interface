@@ -10,7 +10,13 @@ const buttonVariants = cva(
   // Tailwind v4 dropped the default `cursor: pointer` on `button` — pin it
   // here so every Button looks clickable without each call-site having to
   // remember.
-  "inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0",
+  //
+  // Focus: we deliberately DON'T add a ring here. globals.css already gives
+  // every focusable a single `:focus-visible` outline (2px ink, 2px offset);
+  // adding Button's own ring on top produced a double indicator. Relying on the
+  // global outline keeps one consistent focus treatment across buttons, links,
+  // and raw <button>s alike.
+  "inline-flex cursor-pointer items-center justify-center gap-2 whitespace-nowrap rounded-md text-sm font-medium transition-colors disabled:pointer-events-none disabled:opacity-50 [&_svg]:size-4 [&_svg]:shrink-0",
   {
     variants: {
       variant: {

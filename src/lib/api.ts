@@ -247,7 +247,17 @@ export const api = {
     call<BillingAddon>("POST", `/api/v1/teams/${slug}/billing/addons`, data),
   rollTeamCycle: (slug: string) =>
     call<BillingCycle>("POST", `/api/v1/teams/${slug}/billing/roll`, {}),
-  teamCheckout: (slug: string, opts: { return_url?: string; cycle_id?: number; cycle_ids?: number[] } = {}) =>
+  teamCheckout: (
+    slug: string,
+    opts: {
+      return_url?: string;
+      cycle_id?: number;
+      cycle_ids?: number[];
+      // Stable token so a retry after a lost response reuses the same intent
+      // instead of creating (and charging) a second one. See team-panel.tsx.
+      idempotency_key?: string;
+    } = {},
+  ) =>
     call<{
       checkout_url: string;
       payment_id: string;
@@ -258,7 +268,12 @@ export const api = {
     }>(
       "POST",
       `/api/v1/teams/${slug}/billing/checkout`,
-      { return_url: opts.return_url ?? "", cycle_id: opts.cycle_id, cycle_ids: opts.cycle_ids },
+      {
+        return_url: opts.return_url ?? "",
+        cycle_id: opts.cycle_id,
+        cycle_ids: opts.cycle_ids,
+        idempotency_key: opts.idempotency_key,
+      },
     ),
 
   // -------- chat --------
@@ -285,7 +300,16 @@ export const api = {
       reply_to_event_id?: string;
       is_final?: boolean;
     },
-  ) => call<Event>("POST", `/api/v1/rooms/${room_id}/events`, payload),
+    // §2.3 — stamp the optimistic client id into the stored content. The backend
+    // echoes content verbatim, so both the POST response and the WS broadcast
+    // carry it back, letting the client match the echo to its optimistic row by
+    // id (robust to server-side content enrichment) instead of by content equality.
+    client_id?: string,
+  ) =>
+    call<Event>("POST", `/api/v1/rooms/${room_id}/events`, {
+      ...payload,
+      content: client_id ? { ...(payload.content ?? {}), client_id } : payload.content,
+    }),
 
   appendDelta: (event_id: string, delta: string, seq = 0) =>
     call<{ ok: boolean }>("POST", `/api/v1/events/${event_id}/delta`, { delta, seq }),
@@ -424,11 +448,13 @@ export const api = {
   // -------- crons --------
   // Reads are open; create/update/delete are silicon-only (creator-owned) and
   // simply 403 for carbon callers — the UI keeps them read-only.
-  crons: (params: { for?: string; setup_by?: string; mine?: boolean } = {}) => {
+  crons: (params: { for?: string; setup_by?: string; mine?: boolean; team?: string } = {}) => {
     const q = new URLSearchParams();
     if (params.for) q.set("for", params.for);
     if (params.setup_by) q.set("setup_by", params.setup_by);
     if (params.mine) q.set("mine", "1");
+    // §3.6 — scope to crons owned by a team's silicons.
+    if (params.team) q.set("team", params.team);
     const qs = q.toString();
     return call<Cron[]>("GET", `/api/v1/crons/${qs ? `?${qs}` : ""}`);
   },

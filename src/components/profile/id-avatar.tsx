@@ -22,7 +22,17 @@ export function IdAvatar({
   const svg = React.useMemo(() => identiconSvg(seed || "?", size, family), [seed, size, family]);
   const style = { width: size, height: size };
 
-  if (src) {
+  // QA §7.6: presigned S3 photo URLs expire. Without an onError handler an
+  // expired (or otherwise broken) URL renders the browser's broken-image icon
+  // instead of the deterministic glyph we already computed. Track load failure
+  // and fall back to the glyph. Reset whenever the src changes so a fresh URL
+  // gets another chance.
+  const [failed, setFailed] = React.useState(false);
+  React.useEffect(() => {
+    setFailed(false);
+  }, [src]);
+
+  if (src && !failed) {
     return (
       // eslint-disable-next-line @next/next/no-img-element -- presigned S3 URL, not a static asset
       <img
@@ -33,6 +43,7 @@ export function IdAvatar({
         height={size}
         style={style}
         className={cn("shrink-0 border object-cover", className)}
+        onError={() => setFailed(true)}
       />
     );
   }

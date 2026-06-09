@@ -7,6 +7,7 @@ import { toast } from "sonner";
 import { NotePencil } from "@phosphor-icons/react/dist/ssr";
 
 import { api } from "@/lib/api";
+import { copyText } from "@/lib/clipboard";
 import type { Contact, CarbonPublic, Event, Room, SiliconPublic } from "@/lib/types";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
@@ -150,9 +151,10 @@ export function ProfileDrawer({
   const identityLabel = counterpart?.kind === "silicon" ? "silicon id" : "carbon id";
   const identityCopyLabel = counterpart?.kind === "silicon" ? "Silicon ID" : "Carbon ID";
 
-  const copy = (label: string, value: string) => {
-    navigator.clipboard.writeText(value);
-    toast.success(`${label} copied`);
+  // QA §7.1: only toast success on a real copy (insecure-context safe).
+  const copy = async (label: string, value: string) => {
+    if (await copyText(value)) toast.success(`${label} copied`);
+    else toast.error("couldn't copy — copy it manually");
   };
 
   return (
@@ -166,7 +168,7 @@ export function ProfileDrawer({
             border. Stacking another bordered card around it was the "two
             bounding boxes" the user noticed. Single box now. */}
         <div className="flex flex-col items-center gap-3">
-          <IdAvatar seed={handle || "?"} src={photoUrl} size={132} />
+          <IdAvatar seed={handle || "?"} src={photoUrl} size={132} family={counterpart?.kind ?? "carbon"} />
           <div className="text-center">
             <h2 className="text-lg font-semibold tracking-tight">{displayName}</h2>
             {profile && (

@@ -112,7 +112,7 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
     <>
       <div className="flex min-h-[72px] items-center justify-between gap-3 border-b px-8">
         <div className="flex min-w-0 items-center gap-3">
-          <IdAvatar seed={`team:${team.slug}`} src={team.logo_url} size={42} />
+          <IdAvatar seed={`team:${team.slug}`} src={team.logo_url} size={42} family="team" />
           <div className="min-w-0">
             <div className="truncate text-xl font-semibold">{team.name}</div>
             <div className="label-mono mt-1">{slug}</div>
@@ -151,17 +151,14 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
             <ReactivityKpi slug={slug} className="w-full p-4 [&_span.font-mono]:text-3xl" />
             <div className="grid gap-6 xl:grid-cols-2">
               <MembersPreview members={members} onViewAll={() => setTab("members")} />
-              <CronsSection limit={10} onViewAll={() => setTab("crons")} />
+              <CronsSection slug={slug} limit={10} onViewAll={() => setTab("crons")} />
             </div>
           </div>
         )}
         {tab === "structure" && (
           <Section title="structure">
             {structureSvg ? (
-              <div
-                className="flex h-[min(74vh,820px)] min-h-[460px] items-center justify-center overflow-hidden border bg-card p-4 [&_svg]:max-h-full [&_svg]:max-w-full"
-                dangerouslySetInnerHTML={{ __html: structureSvg }}
-              />
+              <SvgStructureFrame svg={structureSvg} />
             ) : structureDsl ? (
               <QuarkStructureFrame dsl={structureDsl} />
             ) : (
@@ -170,7 +167,7 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
           </Section>
         )}
         {tab === "members" && <MembersSection members={members} />}
-        {tab === "crons" && <CronsSection />}
+        {tab === "crons" && <CronsSection slug={slug} />}
         {tab === "invites" && head && (
           <div className="space-y-6">
             <InviteSection slug={slug} />
@@ -181,6 +178,41 @@ function TeamPanelBody({ slug, onClose }: { slug: string; onClose?: () => void }
         {tab === "billing" && head && <BillingSection slug={slug} />}
       </div>
     </>
+  );
+}
+
+// QA P0-3: the team-structure SVG is server-provided and was previously
+// injected with `dangerouslySetInnerHTML` straight into the app origin — a
+// stored-XSS path able to read the access token. We render it inside a
+// sandboxed iframe instead. `sandbox=""` (no flags) means: no script execution
+// (inline `<script>` / `onload=` handlers are inert) AND a unique null origin
+// (no access to the parent's localStorage, cookies, or token). The image still
+// renders; the attack surface is gone.
+function SvgStructureFrame({ svg }: { svg: string }) {
+  const srcDoc = React.useMemo(
+    () => `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <style>
+    html, body { margin: 0; height: 100%; }
+    body { display: flex; align-items: center; justify-content: center; background: #ede8e0; overflow: hidden; }
+    svg { max-width: 100%; max-height: 100%; }
+  </style>
+</head>
+<body>${svg}</body>
+</html>`,
+    [svg],
+  );
+  return (
+    <div className="h-[min(74vh,820px)] min-h-[460px] overflow-hidden border bg-card">
+      <iframe
+        title="team structure"
+        srcDoc={srcDoc}
+        className="h-full w-full"
+        sandbox=""
+      />
+    </div>
   );
 }
 
@@ -284,6 +316,7 @@ function MembersPreview({
                     seed={`${m.member_kind}:${m.member_handle ?? m.member_id}`}
                     src={m.member_photo_url}
                     size={32}
+                    family={memberAvatarFamily(m)}
                   />
                   <span className="min-w-0">
                     <span className="block truncate font-medium">{handle}</span>
@@ -341,6 +374,7 @@ function MembersSection({ members }: { members: TeamMembership[] }) {
                     seed={`${m.member_kind}:${m.member_handle ?? m.member_id}`}
                     src={m.member_photo_url}
                     size={34}
+                    family={memberAvatarFamily(m)}
                   />
                   <span className="min-w-0">
                     <span className="block truncate font-medium">{handle}</span>
@@ -360,6 +394,10 @@ function MembersSection({ members }: { members: TeamMembership[] }) {
 function isHiddenInterfaceMember(m: TeamMembership): boolean {
   const handle = (m.member_handle || "").toLowerCase();
   return m.member_kind === "carbon" && (handle === "lords" || handle === "lords@unlikefraction.com");
+}
+
+function memberAvatarFamily(m: TeamMembership): "carbon" | "silicon" {
+  return m.member_kind === "silicon" ? "silicon" : "carbon";
 }
 
 function teamMemberHandle(m: TeamMembership): string {
@@ -398,12 +436,23 @@ function fmtCents(cents: number, currency = "USD"): string {
   try {
     return new Intl.NumberFormat(undefined, { style: "currency", currency }).format(cents / 100);
   } catch {
-    return `$${(cents / 100).toFixed(2)}`;
+    // QA §3.9: the old fallback hardcoded "$" regardless of the actual
+    // currency, so a EUR/GBP amount silently rendered as dollars when `Intl`
+    // couldn't format it. Echo the real currency code instead of guessing a
+    // symbol we may not have.
+    return `${(cents / 100).toFixed(2)} ${currency}`;
   }
 }
 
+// QA §3.7: `monthLabel` and `longDueDate` are the two date formatters on this
+// surface and they used to disagree — `longDueDate` guarded NaN, this one did
+// not, so a malformed `period_start` rendered "Invalid Date". Guard NaN here
+// too and fall back to the raw string the same way `longDueDate` does, so the
+// two helpers behave consistently.
 function monthLabel(iso: string): string {
-  return new Date(iso).toLocaleDateString(undefined, { month: "short", year: "numeric" });
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleDateString(undefined, { month: "short", year: "numeric" });
 }
 
 function BillingSection({ slug }: { slug: string }) {
@@ -424,27 +473,64 @@ function BillingSection({ slug }: { slug: string }) {
     void load();
   }, [load]);
 
+  // QA P0-4: checkout had no idempotency. A lost response after the server
+  // committed the charge, followed by a retry, could double-charge. We keep a
+  // stable key per cycle-set for the life of this panel so every retry of the
+  // *same* outstanding balance carries the same token and the server dedupes.
+  const idempotencyKeys = React.useRef<Map<string, string>>(new Map());
+  const keyFor = (cycleIds: number[]) => {
+    const sig = [...cycleIds].sort((a, b) => a - b).join(",");
+    let key = idempotencyKeys.current.get(sig);
+    if (!key) {
+      key =
+        typeof crypto !== "undefined" && crypto.randomUUID
+          ? crypto.randomUUID()
+          : `${slug}:${sig}:${Date.now()}:${Math.random().toString(36).slice(2)}`;
+      idempotencyKeys.current.set(sig, key);
+    }
+    return key;
+  };
+
   const payOutstanding = async (cycleIds: number[]) => {
+    if (busy) return; // guard against a second concurrent submit
+    if (cycleIds.length === 0) {
+      toast.info("No pending balance.");
+      return;
+    }
     setBusy(true);
     setCheckoutLoading(true);
     try {
-      if (cycleIds.length === 0) {
-        setCheckoutLoading(false);
-        toast.info("No pending balance.");
+      const r = await api.teamCheckout(slug, {
+        cycle_ids: cycleIds,
+        return_url: window.location.href,
+        idempotency_key: keyFor(cycleIds),
+      });
+      if (r.checkout_url) {
+        // Navigation is starting. Deliberately leave the button disabled (do
+        // NOT reset busy/checkoutLoading) so a second click can't fire another
+        // checkout during the redirect.
+        window.location.assign(r.checkout_url);
         return;
       }
-      const r = await api.teamCheckout(slug, { cycle_ids: cycleIds, return_url: window.location.href });
-      if (r.checkout_url) {
-        window.location.assign(r.checkout_url);
-      } else {
+      // QA §3.5: in demo/staging the server settles the charge itself and
+      // returns `dev_mode: true` with no checkout_url. Previously this fell
+      // through to "Checkout unavailable." — a confusing error in front of a
+      // prospective client. Treat it as a simulated success and refresh the
+      // ledger so the cycle flips to paid.
+      if (r.dev_mode) {
         setCheckoutLoading(false);
-        toast.error(r.error || "Checkout unavailable.");
+        setBusy(false);
+        toast.success("Payment simulated (dev mode).");
+        void load();
+        return;
       }
+      setCheckoutLoading(false);
+      setBusy(false);
+      toast.error(r.error || "Checkout unavailable.");
     } catch (e) {
       setCheckoutLoading(false);
-      toast.error(e instanceof ApiError ? e.message : String(e));
-    } finally {
       setBusy(false);
+      toast.error(e instanceof ApiError ? e.message : String(e));
     }
   };
 
@@ -458,33 +544,104 @@ function BillingSection({ slug }: { slug: string }) {
     );
   }
 
-  const unpaidCycles = data.cycles.filter((cycle) => cycle.status !== "paid");
-  const pendingAmount =
-    data.pending?.amount_cents ?? unpaidCycles.reduce((sum, cycle) => sum + cycle.total_cents, 0);
-  const pendingCurrency = data.pending?.currency ?? data.plan.currency;
-  const pendingCycleIds = data.pending?.cycle_ids ?? unpaidCycles.map((cycle) => cycle.id);
+  // QA §3.2 + §3.3: figuring out what is *actually payable*.
+  //
+  // §3.3 — `status !== "paid"` used to sweep `open` (unbilled) cycles into the
+  // payable set, so a head could be asked to pre-pay an unbilled cycle or the
+  // checkout would 400 on an `open` id. When the server tells us exactly what's
+  // pending via `data.pending`, we trust it *exclusively*. Only when `pending`
+  // is absent do we fall back to deriving payable cycles ourselves, and in that
+  // fallback only `charged`/`failed` cycles are payable — never `open`/`paid`.
+  //
+  // §3.2 — `reduce((s,c)=>s+c.total_cents,0)` summed cents *across currencies*
+  // and formatted the sum with one currency, so a USD plan with a EUR add-on
+  // cycle produced a silently wrong total. We never sum mixed currencies into a
+  // single figure: we group the payable cycles by currency. If everything
+  // shares one currency we show a single total as before; if multiple
+  // currencies are present we render them stacked and disable the single Pay
+  // button (the checkout endpoint settles one currency at a time).
+  const payableCycles = data.pending
+    ? // Trust the server's pending set verbatim — resolve the cycle objects so
+      // we can group/total them by currency for display.
+      data.pending.cycle_ids
+        .map((id) => data.cycles.find((c) => c.id === id))
+        .filter((c): c is BillingCycle => Boolean(c))
+    : // Fallback: only charged/failed cycles are genuinely payable.
+      data.cycles.filter((c) => c.status === "charged" || c.status === "failed");
+
+  // Group the payable cycles by currency so we never conflate them.
+  const byCurrency = new Map<string, { cycleIds: number[]; amountCents: number }>();
+  for (const c of payableCycles) {
+    const bucket = byCurrency.get(c.currency) ?? { cycleIds: [], amountCents: 0 };
+    bucket.cycleIds.push(c.id);
+    bucket.amountCents += c.total_cents;
+    byCurrency.set(c.currency, bucket);
+  }
+  const currencyGroups = [...byCurrency.entries()].map(([currency, g]) => ({
+    currency,
+    ...g,
+  }));
+  const mixedCurrencies = currencyGroups.length > 1;
+
+  // The headline figure. Prefer the server's `pending` (it's authoritative and
+  // single-currency by construction); only fall back to a locally-derived total
+  // when there's exactly one currency in play — never sum across currencies.
+  const singleGroup = currencyGroups.length === 1 ? currencyGroups[0] : null;
+  const pendingAmount = data.pending?.amount_cents ?? singleGroup?.amountCents ?? 0;
+  const pendingCurrency = data.pending?.currency ?? singleGroup?.currency ?? data.plan.currency;
+  const pendingCycleIds = data.pending?.cycle_ids ?? singleGroup?.cycleIds ?? [];
   const statusCopy = billingStatusCopy(data);
 
   return (
     <Section title="billing">
       <div className="space-y-6">
         <div className="grid gap-4 border bg-card p-5 md:grid-cols-[1fr_auto] md:items-end">
-          <div className="space-y-3">
+          <div className="min-w-0 space-y-3">
             <div className="label-mono">pending balance</div>
-            <div className="font-mono text-5xl font-semibold leading-none tabular-nums">
-              {fmtCents(pendingAmount, pendingCurrency)}
-            </div>
-            <p className="max-w-2xl text-sm text-muted-foreground">{statusCopy}</p>
+            {mixedCurrencies ? (
+              // Multiple currencies: render each separately. `break-words`/the
+              // min-w-0 parent keep a huge total from blowing out the layout
+              // (QA §3.9 width clamp).
+              <ul className="space-y-1">
+                {currencyGroups.map((g) => (
+                  <li
+                    key={g.currency}
+                    className="font-mono text-3xl font-semibold leading-none tabular-nums break-words"
+                  >
+                    {fmtCents(g.amountCents, g.currency)}
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <div className="font-mono text-5xl font-semibold leading-none tabular-nums break-words">
+                {fmtCents(pendingAmount, pendingCurrency)}
+              </div>
+            )}
+            <p className="max-w-2xl text-sm text-muted-foreground">
+              {statusCopy}
+              {mixedCurrencies ? (
+                <>
+                  {" "}
+                  This balance spans multiple currencies; pay each currency
+                  separately from its cycle below.
+                </>
+              ) : null}
+            </p>
           </div>
           <Button
             className="h-12 min-w-40"
-            disabled={busy || pendingAmount <= 0}
+            // §3.2: with mixed currencies the single Pay button can't represent
+            // a correct total, so we disable it and direct the head to the
+            // per-cycle rows (the endpoint settles one currency at a time).
+            disabled={busy || mixedCurrencies || pendingAmount <= 0}
             onClick={() => payOutstanding(pendingCycleIds)}
           >
             {checkoutLoading ? (
               <>
                 <CircleNotch className="animate-spin" /> loading
               </>
+            ) : mixedCurrencies ? (
+              "Pay below"
             ) : pendingAmount > 0 ? (
               `Pay ${fmtCents(pendingAmount, pendingCurrency)}`
             ) : (
@@ -545,7 +702,14 @@ function billingStatusCopy(data: BillingData): string {
     return `Payment is due now. Services pause on ${payment.pause_date}.`;
   }
   if (payment.state === "warning") {
-    return `Due ${longDueDate(payment.due_date)}; ${payment.days_left} day${payment.days_left === 1 ? "" : "s"} left.`;
+    // QA §3.7: the panel and the banner used to show two different countdowns
+    // at once — the banner recomputes from `due_date` while the panel printed
+    // `payment.days_left` verbatim from a possibly-stale snapshot. Recompute
+    // here from `due_date` so both surfaces agree; fall back to the snapshot
+    // only when there's no usable date.
+    const left = daysLeftFromDue(payment.due_date) ?? payment.days_left;
+    if (left === null) return `Due ${longDueDate(payment.due_date)}.`;
+    return `Due ${longDueDate(payment.due_date)}; ${left} day${left === 1 ? "" : "s"} left.`;
   }
   if ((data.pending?.amount_cents ?? 0) > 0) {
     return payment.due_date ? `Due ${longDueDate(payment.due_date)}.` : "A balance is open.";
@@ -563,17 +727,49 @@ function longDueDate(iso: string | null): string {
   return `${day} ${month}, ${year}`;
 }
 
+// QA §3.7: derive the live day-count from a due date so the panel and the
+// payment banner never show two disagreeing countdowns. Mirrors the banner's
+// `daysUntil` (local-midnight delta) and returns null for missing/NaN input so
+// callers can fall back gracefully.
+function daysLeftFromDue(iso: string | null): number | null {
+  if (!iso) return null;
+  const target = new Date(`${iso}T00:00:00`);
+  if (Number.isNaN(target.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((target.getTime() - today.getTime()) / 86_400_000);
+}
+
 function CycleCard({ cycle }: { cycle: BillingCycle }) {
+  // QA §3.10: `open` and `charged` both mapped to "secondary" and were visually
+  // indistinguishable, yet they mean very different things — `open` is an
+  // unbilled cycle still accruing (not yet payable), while `charged` is billed
+  // and awaiting payment. Give them distinct treatments: `charged` uses the
+  // warning style (action needed) and `open` stays a quiet outline (nothing to
+  // do yet). `paid`/`failed` keep their existing success/destructive.
   const variant =
-    cycle.status === "paid" ? "success" : cycle.status === "failed" ? "destructive" : "secondary";
-  const payable = cycle.status !== "paid";
+    cycle.status === "paid"
+      ? "success"
+      : cycle.status === "failed"
+        ? "destructive"
+        : cycle.status === "charged"
+          ? "warning"
+          : "outline";
+  // QA §3.3: only charged/failed cycles are genuinely payable; an `open` cycle
+  // is not yet due, so we don't surface its (provisional) due date as if it
+  // were owed.
+  const payable = cycle.status === "charged" || cycle.status === "failed";
   return (
     <div className="border bg-card">
       <div className="flex items-center justify-between border-b px-3 py-2">
         <span className="text-sm font-medium">
           {monthLabel(cycle.period_start)}
           {cycle.due_date && payable && (
-            <span className="ml-2 text-xs font-normal text-muted-foreground">due {cycle.due_date}</span>
+            // QA §3.7: route the due date through `longDueDate` (the same nice
+            // formatter the banner uses) instead of dumping the raw ISO string.
+            <span className="ml-2 text-xs font-normal text-muted-foreground">
+              due {longDueDate(cycle.due_date)}
+            </span>
           )}
         </span>
         <span className="flex items-center gap-2">
@@ -613,9 +809,11 @@ function Section({ title, children }: { title: string; children: React.ReactNode
 }
 
 function CronsSection({
+  slug,
   limit,
   onViewAll,
 }: {
+  slug: string;
   limit?: number;
   onViewAll?: () => void;
 }) {
@@ -625,15 +823,18 @@ function CronsSection({
 
   React.useEffect(() => {
     let alive = true;
+    // §3.6 — scope to the team being viewed: crons owned by this team's
+    // silicons (backend `?team=<slug>` filter), not the viewer's own crons.
+    setLoading(true);
     api
-      .crons({ for: "me" })
+      .crons({ team: slug })
       .then((rows) => alive && setCrons(rows))
       .catch(() => alive && setCrons([]))
       .finally(() => alive && setLoading(false));
     return () => {
       alive = false;
     };
-  }, []);
+  }, [slug]);
 
   return (
     <Section title={`crons${loading ? "" : ` · ${crons.length}`}`}>
@@ -1055,6 +1256,7 @@ function SettingsSection({ team, onSaved }: { team: Team; onSaved: (t: Team) => 
               seed={`team:${team.slug}`}
               src={team.logo_url}
               size={80}
+              family="team"
               className="border-0"
             />
             {logoBusy ? (

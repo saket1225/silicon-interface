@@ -31,19 +31,24 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
   const [loading, setLoading] = React.useState(false);
   const closeRef = React.useRef<HTMLButtonElement>(null);
 
+  // QA medium: a whitespace-only handle was treated as valid and sent to the
+  // API. Validate against the trimmed value everywhere.
+  const trimmedHandle = handle.trim();
+
   const start = async () => {
+    if (!trimmedHandle) return;
     setLoading(true);
     try {
       const target =
         kind === "carbon"
-          ? await api.carbonByHandle(handle)
-          : await api.siliconByHandle(handle);
+          ? await api.carbonByHandle(trimmedHandle)
+          : await api.siliconByHandle(trimmedHandle);
       const id = "carbon_id" in target ? target.carbon_id : target.silicon_id;
       const room = await api.directRoom(kind, id);
       onCreated(room);
       onOpenChange(false);
       setHandle("");
-      toast.success(`opened room with @${handle}`);
+      toast.success(`opened room with @${trimmedHandle}`);
     } catch (e) {
       const msg = e instanceof ApiError ? e.message : String(e);
       toast.error(msg);
@@ -88,7 +93,7 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
               value={handle}
               onChange={(e) => setHandle(e.target.value)}
               onKeyDown={(e) => {
-                if (e.key === "Enter" && handle && !loading) start();
+                if (e.key === "Enter" && trimmedHandle && !loading) start();
               }}
             />
           </div>
@@ -98,7 +103,7 @@ export function NewDirectDialog({ open, onOpenChange, onCreated }: Props) {
                 cancel
               </Button>
             </DialogClose>
-            <Button onClick={start} disabled={!handle || loading}>
+            <Button onClick={start} disabled={!trimmedHandle || loading}>
               {loading && <CircleNotch className="animate-spin" />}
               open
             </Button>

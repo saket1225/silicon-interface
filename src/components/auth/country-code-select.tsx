@@ -57,9 +57,20 @@ export function CountryCodeSelect({ value, onChange, disabled }: Props) {
       <PopoverContent align="start" className="w-72 p-0">
         <div className="flex items-center gap-2 border-b px-3">
           <MagnifyingGlass className="h-4 w-4 shrink-0 opacity-50" />
+          {/* The search field is the combobox; the list below is its popup.
+              aria-activedescendant points at the keyboard-highlighted option so
+              screen readers announce the active row as arrows move without
+              shifting DOM focus off the input. */}
           <input
             autoFocus
             value={q}
+            role="combobox"
+            aria-expanded
+            aria-controls="country-listbox"
+            aria-autocomplete="list"
+            aria-activedescendant={
+              filtered[active] ? `country-opt-${filtered[active].iso2}` : undefined
+            }
             onChange={(e) => setQ(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "ArrowDown") {
@@ -68,6 +79,12 @@ export function CountryCodeSelect({ value, onChange, disabled }: Props) {
               } else if (e.key === "ArrowUp") {
                 e.preventDefault();
                 setActive((i) => Math.max(i - 1, 0));
+              } else if (e.key === "Home") {
+                e.preventDefault();
+                setActive(0);
+              } else if (e.key === "End") {
+                e.preventDefault();
+                setActive(Math.max(0, filtered.length - 1));
               } else if (e.key === "Enter") {
                 e.preventDefault();
                 const c = filtered[active];
@@ -82,14 +99,23 @@ export function CountryCodeSelect({ value, onChange, disabled }: Props) {
             className="h-10 w-full bg-transparent text-sm outline-none placeholder:text-muted-foreground"
           />
         </div>
-        <ul className="max-h-64 overflow-auto py-1">
+        <ul
+          id="country-listbox"
+          role="listbox"
+          aria-label="Country codes"
+          className="max-h-64 overflow-auto py-1"
+        >
           {filtered.length === 0 && (
             <li className="px-3 py-6 text-center text-xs text-muted-foreground">no matches</li>
           )}
           {filtered.map((c, idx) => (
-            <li key={c.iso2}>
+            <li key={c.iso2} role="presentation">
               <button
                 type="button"
+                id={`country-opt-${c.iso2}`}
+                role="option"
+                aria-selected={c.iso2 === selected.iso2}
+                tabIndex={-1}
                 ref={
                   idx === active
                     ? (el) => el?.scrollIntoView({ block: "nearest" })

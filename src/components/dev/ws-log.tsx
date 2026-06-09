@@ -9,18 +9,26 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { Badge } from "@/components/ui/badge";
 
-type Entry = { ts: number; data: unknown };
+type Entry = { id: number; ts: number; data: unknown };
 
 export function WsLog() {
   const [paused, setPaused] = React.useState(false);
   const [entries, setEntries] = React.useState<Entry[]>([]);
   const pausedRef = React.useRef(paused);
-  pausedRef.current = paused;
+  // Keep the ref in sync outside render so the onFrame closure always sees the
+  // latest `paused` without re-subscribing the socket.
+  React.useEffect(() => {
+    pausedRef.current = paused;
+  }, [paused]);
+  // Monotonic id so list keys are stable. The list is prepended, so array index
+  // would reassign every existing row's key on each new frame, defeating React's
+  // reconciliation (Date.now() also collides during a same-tick burst).
+  const seqRef = React.useRef(0);
 
   const socket = useChatSocket({
     onFrame: (f) => {
       if (pausedRef.current) return;
-      setEntries((prev) => [{ ts: Date.now(), data: f }, ...prev].slice(0, 200));
+      setEntries((prev) => [{ id: seqRef.current++, ts: Date.now(), data: f }, ...prev].slice(0, 200));
     },
   });
 
@@ -51,9 +59,9 @@ export function WsLog() {
             {entries.length === 0 ? (
               <div className="text-xs text-muted-foreground p-2">waiting for frames…</div>
             ) : (
-              entries.map((e, i) => (
+              entries.map((e) => (
                 <pre
-                  key={i}
+                  key={e.id}
                   className="font-mono text-[11px] leading-tight whitespace-pre-wrap break-all"
                 >
                   <span className="text-muted-foreground">

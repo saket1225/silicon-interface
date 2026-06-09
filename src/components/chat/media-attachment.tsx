@@ -7,6 +7,8 @@ import {
   DownloadSimple,
   File,
   FilePdf,
+  ShieldWarning,
+  WarningCircle,
 } from "@phosphor-icons/react/dist/ssr";
 
 import { api } from "@/lib/api";
@@ -67,6 +69,15 @@ export function MediaAttachment({
   const [failed, setFailed] = React.useState(false);
   const [previewOpen, setPreviewOpen] = React.useState(false);
 
+  // §6.2 — Pending media (e.g. an in-flight TTS render) reports `status:
+  // "pending"` with a null `download_url`. Rather than show an inert
+  // placeholder forever, we re-fetch on a bounded interval until the server
+  // flips it to "ready" (or a terminal "infected"/"failed"). The attempt cap
+  // stops us hammering the API forever if a job is stuck server-side.
+  const POLL_INTERVAL_MS = 4000;
+  const MAX_POLLS = 30; // ~2 minutes of polling, then we give up gracefully.
+  const [pollExhausted, setPollExhausted] = React.useState(false);
+
   const retriedRef = React.useRef(false);
   React.useEffect(() => {
     if (localUrl) {
@@ -96,18 +107,36 @@ export function MediaAttachment({
     if (!mediaId) return;
     let alive = true;
     retriedRef.current = false;
-    (async () => {
+    setPollExhausted(false);
+    let attempts = 0;
+    let timer: ReturnType<typeof setTimeout> | null = null;
+
+    const poll = async () => {
       try {
         const r = await api.mediaDetail(mediaId);
         if (!alive) return;
         setMedia(r.media);
         setUrl(r.download_url);
+        // Keep polling only while the object is still being produced and we
+        // don't yet have a usable URL. Terminal states (ready/infected/failed)
+        // — or any state that already yielded a URL — stop the loop.
+        const stillPending = r.media.status === "pending" && !r.download_url;
+        if (stillPending) {
+          attempts += 1;
+          if (attempts >= MAX_POLLS) {
+            setPollExhausted(true);
+            return;
+          }
+          timer = setTimeout(poll, POLL_INTERVAL_MS);
+        }
       } catch {
         if (alive) setFailed(true);
       }
-    })();
+    };
+    void poll();
     return () => {
       alive = false;
+      if (timer) clearTimeout(timer);
     };
   }, [mediaId, localUrl, localDurationMs, localPeaks, mime]);
 
@@ -137,7 +166,58 @@ export function MediaAttachment({
     (mime || "").toLowerCase().startsWith("video/");
 
   if (failed) return <span className="text-xs text-destructive">attachment unavailable</span>;
+
+  // §6.1 — Branch on the server's moderation/processing status *before* trying
+  // to render. An AV-flagged ("infected") or transcode-failed ("failed")
+  // object comes back with a null `download_url`; without these guards an
+  // image would render `src={null}` and audio would have no source while the
+  // placeholder spun forever.
+  if (media?.status === "infected") {
+    return (
+      <div className="inline-flex items-center gap-2 border border-destructive/40 bg-destructive/5 px-3 py-2 text-xs text-destructive">
+        <ShieldWarning className="h-4 w-4 shrink-0" weight="fill" />
+        <span>attachment blocked — failed a safety scan</span>
+      </div>
+    );
+  }
+  if (media?.status === "failed") {
+    return (
+      <div className="inline-flex items-center gap-2 border border-destructive/40 bg-card px-3 py-2 text-xs text-destructive">
+        <WarningCircle className="h-4 w-4 shrink-0" weight="fill" />
+        <span>attachment failed to process</span>
+      </div>
+    );
+  }
+
   if (!url) {
+    // §6.2 — Distinguish a still-generating TTS render ("pending", null URL)
+    // from a generic load. For audio we show a live "generating audio…" label
+    // over the waveform so the user knows it's working, not stuck; the poll in
+    // the fetch effect refreshes us once the server flips it to "ready".
+    const isPendingTts =
+      media?.status === "pending" &&
+      (media?.kind === "tts_output" || (mime || "").toLowerCase().startsWith("audio/"));
+    if (isPendingTts) {
+      return (
+        <div className="flex w-full max-w-[20rem] flex-col gap-1">
+          <SiliconAudio
+            url={null}
+            peaks={media?.peaks ?? null}
+            durationMs={media?.duration_ms ?? null}
+            className="w-full"
+          />
+          <span className="inline-flex items-center gap-1 label-mono text-[10px] text-muted-foreground">
+            {pollExhausted ? (
+              <>generation is taking longer than usual…</>
+            ) : (
+              <>
+                <CircleNotch className="h-3 w-3 animate-spin" /> generating audio…
+              </>
+            )}
+          </span>
+        </div>
+      );
+    }
     if (probablyVisual) {
       // #22 — Reserve the *exact* aspect from media.width/height so loading
       // never reflows the bubble.

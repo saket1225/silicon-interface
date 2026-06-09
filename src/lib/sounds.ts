@@ -5,10 +5,11 @@
 //  • "sent"     → quick ascending chirp (~120ms, 800 → 1300 Hz)
 //  • "received" → soft descending tap   (~150ms, 880 → 600 Hz)
 //
-// We respect both the prefers-reduced-motion media query and a per-user
-// localStorage opt-out (`silicon-interface:sounds = "off"`) so it's never
-// invasive. AudioContext is lazily constructed and reused — browsers cap
-// the number that can exist at once.
+// Sound is governed solely by a per-user opt-out (`silicon-interface:sounds =
+// "off"`). It is deliberately *decoupled* from prefers-reduced-motion: a user
+// who disabled motion for vestibular reasons should not lose audio cues — those
+// are separate accessibility axes with a separate preference key. AudioContext
+// is lazily constructed and reused — browsers cap how many can exist at once.
 
 let _ctx: AudioContext | null = null;
 function ctx(): AudioContext | null {
@@ -33,17 +34,60 @@ function enabled(): boolean {
   } catch {
     /* private mode etc — fine */
   }
-  if (window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return false;
+  // NOTE: intentionally NOT gated on prefers-reduced-motion — see file header.
   return true;
 }
 
-function tone(start: number, end: number, durSec: number, vol = 0.07) {
+// --- first-gesture primer -------------------------------------------------
+// Browsers start the AudioContext in `suspended` state until a user gesture.
+// resume() returns a promise; if we schedule the oscillator before it resolves,
+// the very first beep is silently dropped. We prime (resume) on the first user
+// gesture so the context is already running by the time the first message tone
+// fires. This listener is installed lazily and removed after it runs once.
+let _primed = false;
+function primeOnce() {
+  if (_primed || typeof window === "undefined") return;
+  _primed = true;
+  const ac = ctx();
+  if (ac && ac.state === "suspended") ac.resume().catch(() => undefined);
+}
+if (typeof window !== "undefined") {
+  const onGesture = () => {
+    primeOnce();
+    window.removeEventListener("pointerdown", onGesture);
+    window.removeEventListener("keydown", onGesture);
+  };
+  window.addEventListener("pointerdown", onGesture, { once: true });
+  window.addEventListener("keydown", onGesture, { once: true });
+}
+
+// --- throttle -------------------------------------------------------------
+// A burst (e.g. 10 incoming messages in one tick) must not stack 10 overlapping
+// tones. We coalesce: rapid calls within MIN_INTERVAL_MS collapse to a single
+// audible beep. Stored per "kind" so a sent + received in the same window can
+// still both play.
+const MIN_INTERVAL_MS = 220;
+const _lastPlayed: Record<string, number> = {};
+
+function play(kind: string, start: number, end: number, durSec: number, vol: number) {
   if (!enabled()) return;
+  const now = Date.now();
+  if (now - (_lastPlayed[kind] ?? 0) < MIN_INTERVAL_MS) return;
+  _lastPlayed[kind] = now;
+
   const ac = ctx();
   if (!ac) return;
-  // Some browsers suspend AudioContext until a user gesture; resume is
-  // idempotent and a no-op when already running.
-  if (ac.state === "suspended") ac.resume().catch(() => undefined);
+  // If still suspended (no gesture yet, or the primer hasn't fired), resume and
+  // schedule the oscillator only after it resolves — otherwise this beep is
+  // dropped. resume() is idempotent / a no-op when already running.
+  if (ac.state === "suspended") {
+    ac.resume().then(() => emit(ac, start, end, durSec, vol)).catch(() => undefined);
+  } else {
+    emit(ac, start, end, durSec, vol);
+  }
+}
+
+function emit(ac: AudioContext, start: number, end: number, durSec: number, vol: number) {
   const t0 = ac.currentTime;
   const osc = ac.createOscillator();
   const gain = ac.createGain();
@@ -59,9 +103,9 @@ function tone(start: number, end: number, durSec: number, vol = 0.07) {
 }
 
 export function playSent() {
-  tone(820, 1320, 0.12);
+  play("sent", 820, 1320, 0.12, 0.07);
 }
 
 export function playReceived() {
-  tone(880, 620, 0.16, 0.06);
+  play("received", 880, 620, 0.16, 0.06);
 }

@@ -6,8 +6,14 @@ import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
+import { validateImageFile } from "@/lib/image-upload";
 import { guessTimezone } from "@/lib/timezones";
 import type { Carbon } from "@/lib/types";
+
+// QA §7.3: the tagline is capped at 160 but the name had no bounds at all — a
+// whitespace-only name renders blank everywhere and a 5000-char name breaks the
+// share card and drawer. Trim-validate against these.
+const NAME_MAX = 80;
 
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -37,6 +43,24 @@ export function ProfileEditor() {
         tz !== baselineTz),
   );
 
+  // QA §7.3: validate the trimmed name. Empty/whitespace and over-length are
+  // both blocked, with the error surfaced inline (not just on the toast).
+  const trimmedName = name.trim();
+  const nameError = !trimmedName
+    ? "name can't be empty"
+    : trimmedName.length > NAME_MAX
+      ? `name must be ${NAME_MAX} characters or fewer`
+      : null;
+
+  // Track whether the user has started editing so the mount refetch below
+  // can't clobber in-progress typing on a slow network (QA medium). Written in
+  // an effect (not during render) so it stays a pure side-channel for the
+  // one-shot mount fetch.
+  const dirtyRef = React.useRef(false);
+  React.useEffect(() => {
+    dirtyRef.current = dirty;
+  }, [dirty]);
+
   // Refresh from the server (gets profile_photo_url + latest fields).
   React.useEffect(() => {
     let alive = true;
@@ -45,9 +69,15 @@ export function ProfileEditor() {
         const c = await api.me();
         if (!alive) return;
         setMe(c);
-        setName(c.name);
-        setTagline(c.tagline);
-        setTz(c.timezone || guessTimezone());
+        // QA medium: only overwrite the form fields if the user hasn't started
+        // editing — otherwise a slow `me()` resolving mid-keystroke wipes their
+        // input. Always seed with `?? ""` so a null server value can't flip the
+        // controlled input to uncontrolled (React warning).
+        if (!dirtyRef.current) {
+          setName(c.name ?? "");
+          setTagline(c.tagline ?? "");
+          setTz(c.timezone || guessTimezone());
+        }
         authStore.setCarbon(c);
       } catch {
         /* keep cached */
@@ -58,12 +88,31 @@ export function ProfileEditor() {
     };
   }, []);
 
+  // QA §7.4: warn before a full-page unload (closing the tab, hard reload)
+  // while there are unsaved name/tagline/timezone edits. In-app navigation is
+  // guarded separately on the header-logo click path; this covers the browser.
+  React.useEffect(() => {
+    if (!dirty) return;
+    const onBeforeUnload = (e: BeforeUnloadEvent) => {
+      e.preventDefault();
+      // Legacy browsers require a returnValue to trigger the native prompt.
+      e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
+  }, [dirty]);
+
   if (!me) return null; // not signed in as a Carbon
 
   const save = async () => {
+    // QA §7.3: never persist an empty/whitespace or over-length name.
+    if (nameError) {
+      toast.error(nameError);
+      return;
+    }
     setBusy(true);
     try {
-      const c = await api.patchMe({ name, tagline, timezone: tz });
+      const c = await api.patchMe({ name: trimmedName, tagline, timezone: tz });
       setMe(c);
       authStore.setCarbon(c);
       toast.success("profile saved");
@@ -75,11 +124,19 @@ export function ProfileEditor() {
   };
 
   const onUpload = async (file: File) => {
+    // QA §7.5: validate size + real image MIME before presign; never relabel an
+    // empty type as png.
+    const v = validateImageFile(file);
+    if (!v.ok) {
+      toast.error(v.error ?? "unsupported image");
+      if (fileRef.current) fileRef.current.value = "";
+      return;
+    }
     setBusy(true);
     setPhotoBusy(true);
     try {
       const r = await api.presignUpload({
-        mime: file.type || "image/png",
+        mime: file.type,
         size: file.size,
         kind: "profile_icon",
         filename: file.name,
@@ -148,7 +205,19 @@ export function ProfileEditor() {
 
         <div className="space-y-3">
           <Label htmlFor="pname">name</Label>
-          <Input id="pname" value={name} onChange={(e) => setName(e.target.value)} />
+          <Input
+            id="pname"
+            value={name}
+            maxLength={NAME_MAX}
+            aria-invalid={nameError ? true : undefined}
+            aria-describedby={nameError ? "pname-error" : undefined}
+            onChange={(e) => setName(e.target.value)}
+          />
+          {nameError && (
+            <p id="pname-error" className="text-xs text-destructive">
+              {nameError}
+            </p>
+          )}
         </div>
         <div className="space-y-3">
           <Label htmlFor="ptag">tagline</Label>
@@ -165,7 +234,7 @@ export function ProfileEditor() {
           <TimezoneSelect value={tz} onChange={setTz} />
         </div>
 
-        <Button onClick={save} disabled={busy || !dirty}>
+        <Button onClick={save} disabled={busy || !dirty || Boolean(nameError)}>
           {busy && <CircleNotch className="animate-spin" />} save profile
         </Button>
       </CardContent>

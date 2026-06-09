@@ -1,9 +1,14 @@
 "use client";
 
-const VERSION = 1;
+const VERSION = 2;
 const MAX_NOTIFICATIONS = 80;
 const PREFIX = "silicon-interface:notifications";
 export const NOTIFICATION_EVENT = "silicon-interface:notifications-changed";
+// Soft-navigation request raised when a browser/OS notification is clicked.
+// The NotificationCenter (which owns a Next router) subscribes and does a
+// client-side push — see showBrowserNotification. This avoids the cold
+// window.location reload that used to tear down the live socket.
+export const NOTIFICATION_NAVIGATE_EVENT = "silicon-interface:notifications-navigate";
 
 export interface InterfaceNotification {
   id: string;
@@ -22,6 +27,11 @@ interface StoredNotifications {
   version: typeof VERSION;
   ownerId: string;
   items: InterfaceNotification[];
+  // Unread count is tracked independently of `items` so trimming the kept
+  // window (cap at 80, shrink to 30 under quota) never silently undercounts
+  // unread. `unreadExtra` holds unread notifications that fell out of the
+  // kept window; the visible count is `unreadExtra + (unread items kept)`.
+  unreadExtra: number;
 }
 
 function key(ownerId: string): string {
@@ -33,41 +43,79 @@ function notify(ownerId: string) {
   window.dispatchEvent(new CustomEvent(NOTIFICATION_EVENT, { detail: { ownerId } }));
 }
 
-export function loadNotifications(ownerId: string): InterfaceNotification[] {
-  if (typeof window === "undefined" || !ownerId) return [];
+function read(ownerId: string): StoredNotifications {
+  const empty: StoredNotifications = { version: VERSION, ownerId, items: [], unreadExtra: 0 };
+  if (typeof window === "undefined" || !ownerId) return empty;
   const raw = window.localStorage.getItem(key(ownerId));
-  if (!raw) return [];
+  if (!raw) return empty;
   try {
     const parsed = JSON.parse(raw) as Partial<StoredNotifications>;
     if (parsed.version !== VERSION || parsed.ownerId !== ownerId || !Array.isArray(parsed.items)) {
-      return [];
+      return empty;
     }
-    return parsed.items;
+    return {
+      version: VERSION,
+      ownerId,
+      items: parsed.items,
+      unreadExtra: typeof parsed.unreadExtra === "number" && parsed.unreadExtra > 0 ? parsed.unreadExtra : 0,
+    };
   } catch {
-    return [];
+    return empty;
   }
 }
 
-function saveNotifications(ownerId: string, items: InterfaceNotification[]) {
+export function loadNotifications(ownerId: string): InterfaceNotification[] {
+  return read(ownerId).items;
+}
+
+/**
+ * Live unread count, decoupled from the kept-items window. Equals the unread
+ * items still in the window plus any unread that were trimmed away — so a user
+ * with 200 truly-unread notifications sees "200", not a value capped at the
+ * window size.
+ */
+export function loadUnreadCount(ownerId: string): number {
+  const store = read(ownerId);
+  const keptUnread = store.items.reduce((n, item) => (item.read ? n : n + 1), 0);
+  return keptUnread + store.unreadExtra;
+}
+
+/** How many notifications exist beyond the kept window — drives a "showing latest N" affordance. */
+export function trimmedCount(ownerId: string): number {
+  return read(ownerId).unreadExtra;
+}
+
+function persist(ownerId: string, items: InterfaceNotification[], unreadExtra: number) {
   if (typeof window === "undefined" || !ownerId) return;
-  const payload: StoredNotifications = {
-    version: VERSION,
-    ownerId,
-    items: items.slice(0, MAX_NOTIFICATIONS),
+  const write = (keep: number, extra: number) => {
+    // Items that get trimmed and are still unread must roll into unreadExtra so
+    // the visible unread count stays accurate even as the window shrinks.
+    const trimmedUnread = items.slice(keep).reduce((n, item) => (item.read ? n : n + 1), 0);
+    const payload: StoredNotifications = {
+      version: VERSION,
+      ownerId,
+      items: items.slice(0, keep),
+      unreadExtra: extra + trimmedUnread,
+    };
+    window.localStorage.setItem(key(ownerId), JSON.stringify(payload));
   };
   try {
-    window.localStorage.setItem(key(ownerId), JSON.stringify(payload));
+    write(MAX_NOTIFICATIONS, unreadExtra);
   } catch {
     try {
-      window.localStorage.setItem(
-        key(ownerId),
-        JSON.stringify({ ...payload, items: payload.items.slice(0, 30) }),
-      );
+      // Quota pressure — keep a smaller window but preserve the unread count by
+      // folding the additionally-dropped items into unreadExtra (handled in write).
+      write(30, unreadExtra);
     } catch {
       window.localStorage.removeItem(key(ownerId));
     }
   }
   notify(ownerId);
+}
+
+function saveNotifications(ownerId: string, items: InterfaceNotification[]) {
+  // Preserve the existing trimmed-unread tally across non-trimming mutations.
+  persist(ownerId, items, read(ownerId).unreadExtra);
 }
 
 export function addNotification(ownerId: string, item: Omit<InterfaceNotification, "ownerId" | "read">) {
@@ -78,31 +126,38 @@ export function addNotification(ownerId: string, item: Omit<InterfaceNotificatio
 }
 
 export function markNotificationRead(ownerId: string, id: string) {
-  const current = loadNotifications(ownerId);
-  saveNotifications(
+  const store = read(ownerId);
+  // A kept item is being read. If it was unread we don't touch unreadExtra,
+  // because that counts items already gone from the window.
+  persist(
     ownerId,
-    current.map((item) => (item.id === id ? { ...item, read: true } : item)),
+    store.items.map((item) => (item.id === id ? { ...item, read: true } : item)),
+    store.unreadExtra,
   );
 }
 
 export function markRoomNotificationsRead(ownerId: string, roomId: string) {
-  const current = loadNotifications(ownerId);
-  saveNotifications(
+  const store = read(ownerId);
+  persist(
     ownerId,
-    current.map((item) => (item.roomId === roomId ? { ...item, read: true } : item)),
+    store.items.map((item) => (item.roomId === roomId ? { ...item, read: true } : item)),
+    store.unreadExtra,
   );
 }
 
 export function markAllNotificationsRead(ownerId: string) {
-  const current = loadNotifications(ownerId);
-  saveNotifications(
+  const store = read(ownerId);
+  // "Mark all" also clears the trimmed-unread tally — the user has acknowledged
+  // everything, including notifications no longer in the window.
+  persist(
     ownerId,
-    current.map((item) => ({ ...item, read: true })),
+    store.items.map((item) => ({ ...item, read: true })),
+    0,
   );
 }
 
 export function clearNotifications(ownerId: string) {
-  saveNotifications(ownerId, []);
+  persist(ownerId, [], 0);
 }
 
 export function browserNotificationPermission(): NotificationPermission | "unsupported" {
@@ -121,7 +176,11 @@ export function showBrowserNotification(
 ) {
   if (typeof window === "undefined" || !("Notification" in window)) return;
   if (window.Notification.permission !== "granted") return;
-  if (document.visibilityState === "visible" && document.hasFocus()) return;
+  // Only raise an OS notification when the document is hidden. A visible tab —
+  // even one that's unfocused (a second monitor) — already gets the in-app
+  // toast; firing the OS notification too is a double-notify. Gating purely on
+  // visibilityState (not hasFocus) suppresses that duplicate.
+  if (document.visibilityState === "visible") return;
   try {
     const notification = new window.Notification(title, {
       icon: "/icon.png",
@@ -130,7 +189,14 @@ export function showBrowserNotification(
     });
     notification.onclick = () => {
       window.focus();
-      if (options.roomId) window.location.href = `/chat?room=${encodeURIComponent(options.roomId)}`;
+      // Soft client-side navigation: ask a subscriber (NotificationCenter) to
+      // router.push instead of a hard window.location.href, which would
+      // cold-reload the SPA and drop the live socket.
+      if (options.roomId) {
+        window.dispatchEvent(
+          new CustomEvent(NOTIFICATION_NAVIGATE_EVENT, { detail: { roomId: options.roomId } }),
+        );
+      }
       notification.close();
     };
   } catch {

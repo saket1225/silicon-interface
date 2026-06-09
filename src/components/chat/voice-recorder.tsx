@@ -139,6 +139,13 @@ export function VoiceRecorder({ active, onCancel, onSubmit }: Props) {
 
     return () => {
       cancelled = true;
+      // §6.5 — Actually tear the recorder down on unmount. Previously this
+      // only flipped `cancelled`, so switching rooms mid-record left the
+      // MediaStream open (OS mic indicator stuck on) and the recorder alive.
+      // We set the intent to "cancel" first so the `onstop` handler doesn't
+      // emit a half-finished blob, then stop the stream + close the context.
+      intentRef.current = "cancel";
+      cleanup();
     };
     // onSubmit/onCancel/cleanup are stable for the lifetime of this hook
     // invocation — re-running on every render would tear down the recorder.
@@ -186,8 +193,11 @@ export function VoiceRecorder({ active, onCancel, onSubmit }: Props) {
           sumSq += v * v;
         }
         const rms = Math.sqrt(sumSq / buf.length);
-        // Boost so quiet speech still moves the bars; cap at 1.
-        const amp = Math.min(1, rms * 4);
+        // Boost so quiet speech still moves the bars; cap at 1. Add a tiny
+        // breathing floor (a slow sine on the sample clock) so a silent mic
+        // still scrolls a faint ripple instead of looking frozen/flatlined.
+        const idleFloor = 0.06 + 0.04 * Math.abs(Math.sin(now / 350));
+        const amp = Math.min(1, Math.max(idleFloor, rms * 4));
         setWaves((prev) => {
           // Keep length === barCount: drop the oldest, push the newest.
           const next =

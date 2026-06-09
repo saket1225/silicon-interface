@@ -82,19 +82,34 @@ export function ForwardDialog({ open, onOpenChange, event, rooms, sourceRoomId }
       // Re-post into each selected room. The original event type/content is
       // preserved; we just stash forward_from for the receiver to render.
       const content = { ...(event.content as object), forward_from: forwardFrom };
-      await Promise.all(
-        Array.from(selected).map((rid) =>
-          api
-            .sendEvent(rid, { type: event.type, content })
-            .catch((e) =>
-              toast.error(
-                e instanceof ApiError ? e.message : "forward failed",
-              ),
-            ),
-        ),
+      // QA §7.7: the old code `.catch`'d each send and used Promise.all, so the
+      // aggregate always resolved and "forwarded to N chats" fired even when
+      // every send failed (the user saw N error toasts AND a success toast).
+      // Use allSettled and report the real success/failure split.
+      const targets = Array.from(selected);
+      const results = await Promise.allSettled(
+        targets.map((rid) => api.sendEvent(rid, { type: event.type, content })),
       );
-      toast.success(`forwarded to ${selected.size} ${selected.size === 1 ? "chat" : "chats"}`);
-      onOpenChange(false);
+      const failures = results.filter((r) => r.status === "rejected");
+      const ok = results.length - failures.length;
+
+      if (ok > 0) {
+        toast.success(`forwarded to ${ok} ${ok === 1 ? "chat" : "chats"}`);
+      }
+      if (failures.length > 0) {
+        // Surface the first real error message; the rest are almost always the
+        // same transient cause, and N stacked toasts is noise.
+        const first = failures[0] as PromiseRejectedResult;
+        const reason = first.reason;
+        const detail = reason instanceof ApiError ? reason.message : "forward failed";
+        toast.error(
+          `couldn't forward to ${failures.length} ${failures.length === 1 ? "chat" : "chats"} — ${detail}`,
+        );
+      }
+
+      // Only dismiss when everything went through; on partial/total failure
+      // keep the picker open so the user can retry the rest.
+      if (failures.length === 0) onOpenChange(false);
     } finally {
       setSending(false);
     }
@@ -128,18 +143,22 @@ export function ForwardDialog({ open, onOpenChange, event, rooms, sourceRoomId }
           )}
           {filtered.map((r) => {
             const d = roomDisplay(r);
+            const peerKind = r.peers[0]?.kind ?? "carbon";
             const isSelected = selected.has(r.room_id);
             return (
               <li key={r.room_id}>
                 <button
                   type="button"
+                  // QA a11y: selection was conveyed by background color only.
+                  // aria-pressed exposes the toggle state to screen readers.
+                  aria-pressed={isSelected}
                   onClick={() => toggle(r.room_id)}
                   className={cn(
                     "flex w-full items-center gap-3 px-4 py-2 text-left transition-colors",
                     isSelected ? "bg-secondary" : "hover:bg-accent",
                   )}
                 >
-                  <IdAvatar seed={d.handle} src={d.photoUrl} size={32} />
+                  <IdAvatar seed={d.handle} src={d.photoUrl} size={32} family={peerKind} />
                   <div className="min-w-0 flex-1">
                     <div className="truncate text-sm font-medium">{d.name}</div>
                     <div className="truncate text-xs text-muted-foreground">

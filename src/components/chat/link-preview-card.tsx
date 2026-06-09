@@ -9,22 +9,39 @@ interface Props {
   preview: LinkPreview;
 }
 
+/** Only http(s) URLs are safe to linkify — `javascript:`/`data:`/`file:` etc.
+ *  must never become a clickable anchor in the chat surface. Returns the URL
+ *  if its scheme is allowed, else null. */
+function safeHttpUrl(raw?: string | null): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    return u.protocol === "http:" || u.protocol === "https:" ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
 /** Renders Glass's OG-style link preview as a compact card. Click anywhere
  *  opens the URL in a new tab. */
 export function LinkPreviewCard({ preview }: Props) {
-  if (!preview?.url) return null;
-  const title = preview.title || preview.host || preview.url;
+  const safeUrl = safeHttpUrl(preview?.url);
+  if (!safeUrl) return null;
+  // Likewise only render an OG image if it's an http(s) (or protocol-relative
+  // becomes such) resource — never a data:/javascript: src.
+  const safeImage = safeHttpUrl(preview.image);
+  const title = preview.title || preview.host || safeUrl;
   return (
     <a
-      href={preview.url}
+      href={safeUrl}
       target="_blank"
       rel="noopener noreferrer"
       className="mt-2 flex max-w-md items-stretch border bg-card text-foreground transition-colors hover:bg-accent"
     >
-      {preview.image && (
+      {safeImage && (
         // eslint-disable-next-line @next/next/no-img-element -- arbitrary OG URL
         <img
-          src={preview.image}
+          src={safeImage}
           alt=""
           className="h-20 w-20 shrink-0 object-cover"
         />

@@ -19,19 +19,28 @@ export function RemoteBrowserCard({
   expiresAt?: string;
   ttlMinutes?: number;
 }) {
+  const expMs = expiresAt ? Date.parse(expiresAt) : 0;
+  const validExp = expMs > 0 && Number.isFinite(expMs);
+
   // Tick every second so the ring glides; the minute label updates each minute.
   const [now, setNow] = React.useState(() => Date.now());
   React.useEffect(() => {
+    // Don't tick forever. Once the link is expired (or has no valid expiry)
+    // there's nothing to animate — a permanent 1s interval is wasted work.
+    if (!validExp) return;
+    if (now >= expMs) return;
     const id = window.setInterval(() => setNow(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, []);
+  }, [validExp, expMs, now]);
 
-  const expMs = expiresAt ? Date.parse(expiresAt) : 0;
   const totalMs = (ttlMinutes ?? 60) * 60_000;
-  const remainMs = expMs ? Math.max(0, expMs - now) : 0;
-  const expired = !expMs || remainMs <= 0;
+  const remainMs = validExp ? Math.max(0, expMs - now) : 0;
+  const expired = !validExp || remainMs <= 0;
   const frac = totalMs > 0 ? Math.max(0, Math.min(1, remainMs / totalMs)) : 0;
   const minutesLeft = Math.ceil(remainMs / 60_000);
+  // "expires soon" should mean something — only flag it near the end. Otherwise
+  // show the actual remaining time so the label tracks the ring.
+  const expiresSoon = !expired && remainMs <= 5 * 60_000;
 
   // Ring geometry.
   const size = 48;
@@ -40,11 +49,16 @@ export function RemoteBrowserCard({
   const circ = 2 * Math.PI * r;
   const offset = circ * (1 - frac);
 
+  // Only http(s) links are clickable — refuse javascript:/data:/file: so a
+  // silicon-sent card can never become an injection vector.
   let host = url;
+  let safeUrl: string | null = null;
   try {
-    host = new URL(url).host || url;
+    const u = new URL(url);
+    host = u.host || url;
+    if (u.protocol === "http:" || u.protocol === "https:") safeUrl = url;
   } catch {
-    /* leave as-is */
+    /* leave host as-is; safeUrl stays null → non-clickable */
   }
 
   const card = (
@@ -90,16 +104,21 @@ export function RemoteBrowserCard({
           </span>
         </div>
         <span className="text-[10px] text-muted-foreground">
-          {expired ? "link expired" : "expires soon"}
+          {expired
+            ? "link expired"
+            : expiresSoon
+              ? "expires soon"
+              : `expires in ${minutesLeft}m`}
         </span>
       </div>
     </div>
   );
 
-  if (expired) return card;
+  // Non-clickable when expired or the scheme isn't http(s).
+  if (expired || !safeUrl) return card;
   return (
     <a
-      href={url}
+      href={safeUrl}
       target="_blank"
       rel="noopener noreferrer"
       className="block transition-opacity hover:opacity-90"

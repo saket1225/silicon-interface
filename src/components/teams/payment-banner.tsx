@@ -94,6 +94,11 @@ export function PaymentBanner() {
         const grace = !paused && (pay.state === "grace" || (daysToDue !== null && daysToDue <= 0));
         const amount = money(pay.amount_cents, pay.currency);
         const plural = (n: number) => (n === 1 ? "" : "s");
+        // QA §3.4: `daysToPause`/`daysToDue` can legitimately be null (a `grace`
+        // state the server sent with no pause/due fields). Interpolating a null
+        // straight into copy reads "pause in null days". When we don't have a
+        // concrete count we say "soon" instead of inventing a number, and only
+        // render the explicit "in N days" phrasing when N is a real number.
         return (
           <div
             key={r.slug}
@@ -114,15 +119,19 @@ export function PaymentBanner() {
                 <span>
                   <strong>{r.name}</strong> — payment overdue. Your services will{" "}
                   <strong>
-                    pause in {daysToPause} day{plural(daysToPause as number)}
+                    {daysToPause !== null
+                      ? `pause in ${daysToPause} day${plural(daysToPause)}`
+                      : "pause soon"}
                   </strong>{" "}
                   unless {amount} is paid{due ? ` (was due ${due})` : ""}.
                 </span>
               ) : (
                 <span>
-                  <strong>{r.name}</strong> — payment of {amount} due in{" "}
+                  <strong>{r.name}</strong> — payment of {amount}{" "}
                   <strong>
-                    {daysToDue} day{plural(daysToDue as number)}
+                    {daysToDue !== null
+                      ? `due in ${daysToDue} day${plural(daysToDue)}`
+                      : "due soon"}
                   </strong>
                   {due ? ` (by ${due})` : ""}.
                 </span>

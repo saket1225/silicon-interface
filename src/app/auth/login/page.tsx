@@ -10,7 +10,13 @@ import { api, ApiError } from "@/lib/api";
 import { authStore } from "@/lib/auth";
 import { track } from "@/lib/analytics";
 import { useResendCooldown } from "@/lib/use-resend";
-import { findCountry, guessCountryIso2, parseE164, type Country } from "@/lib/country-codes";
+import {
+  findCountry,
+  guessCountryIso2,
+  normalizePhonePaste,
+  parseE164,
+  type Country,
+} from "@/lib/country-codes";
 import type { LoginChannel, LoginChannelOption } from "@/lib/types";
 
 import { Button } from "@/components/ui/button";
@@ -61,7 +67,17 @@ function LoginPageInner() {
   const [sentTo, setSentTo] = React.useState("");
   const [code, setCode] = React.useState("");
   const [loading, setLoading] = React.useState(false);
-  const resend = useResendCooldown();
+  // Guards against concurrent verifies: OtpInput.onComplete fires the instant
+  // the 6th digit lands, but the user may also hit the button or Enter in the
+  // same tick. `loading` flips a render later (too late to block a synchronous
+  // double-call), so a ref gives us a synchronous lock for the same code.
+  const verifyingRef = React.useRef(false);
+  // Mirror of the last verify error for the OTP field's aria-live region (the
+  // toast alone isn't announced reliably / lingers off-screen for SR users).
+  const [otpError, setOtpError] = React.useState("");
+  // persistKey keeps the resend countdown/lockout alive across an OTP-screen
+  // refresh instead of resetting it (which would let a reload dodge the throttle).
+  const resend = useResendCooldown({ persistKey: "silicon-interface:resend:login" });
 
   const phoneE164 = number ? `+${country.dial}${number.replace(/\D/g, "")}` : "";
 
@@ -94,7 +110,12 @@ function LoginPageInner() {
         setOptions(r.options ?? []);
         setPhase("choose");
       } else {
-        setChosenChannel(r.channel ?? "");
+        // If the server doesn't echo `channel` we must still remember *some*
+        // channel so a later resend can re-select on the SAME challenge instead
+        // of calling loginStart() and spawning a brand-new challenge_id (which
+        // would silently abandon the code the user is about to type). Infer it
+        // from the entry mode: phone → "sms", username/email → "email".
+        setChosenChannel(r.channel ?? (mode === "phone" ? "sms" : "email"));
         setSentTo(r.sent_to ?? "");
         setPhase("code");
         resend.send();
@@ -112,25 +133,64 @@ function LoginPageInner() {
 
   const doResend = () =>
     wrap(async () => {
-      const r = chosenChannel
-        ? await api.loginSelectChannel(challengeId, chosenChannel)
-        : await api.loginStart(mode === "phone" ? phoneE164 : identifier.trim());
-      if (r.challenge_id) setChallengeId(r.challenge_id);
-      setSentTo(r.sent_to ?? sentTo);
+      // Resend must reuse the IN-PROGRESS challenge, not start a fresh login.
+      // Re-selecting the channel on the existing challenge_id re-sends a code
+      // for that same challenge, so the code the user is typing stays valid.
+      // We always have a challengeId here (we only reach the code phase after
+      // one is set) and always a chosenChannel (defaulted from mode in `start`
+      // even when the server omits `channel`). Only as a last-ditch fallback —
+      // if somehow neither is present — do we restart, since there's nothing to
+      // resend against.
+      const channel = chosenChannel || (mode === "phone" ? "sms" : "email");
+      if (challengeId) {
+        const r = await api.loginSelectChannel(challengeId, channel);
+        if (!chosenChannel) setChosenChannel(channel);
+        setSentTo(r.sent_to ?? sentTo);
+      } else {
+        const r = await api.loginStart(mode === "phone" ? phoneE164 : identifier.trim());
+        if (r.challenge_id) setChallengeId(r.challenge_id);
+        setSentTo(r.sent_to ?? sentTo);
+      }
       resend.send();
       toast.success("code resent");
     });
 
-  const verify = (value = code) =>
-    wrap(async () => {
-      const r = await api.loginVerify(challengeId, value);
-      authStore.setTokens(r.access, r.refresh);
-      const me = await api.me();
-      authStore.setCarbon(me);
-      track.loggedIn({ method: "otp" });
-      toast.success(`welcome back, @${me.username}`);
-      router.replace("/chat");
+  const verify = (value = code) => {
+    // Synchronous re-entrancy guard — see verifyingRef above. Bail before wrap()
+    // so a double-fire can't even flip the loading spinner twice.
+    if (verifyingRef.current) return;
+    if (value.length !== 6) return;
+    verifyingRef.current = true;
+    setOtpError("");
+    return wrap(async () => {
+      try {
+        const r = await api.loginVerify(challengeId, value);
+        // Tokens are persisted here — the user IS logged in now. P0-5: a failure
+        // of the follow-up profile fetch must never strand them on the login
+        // screen with a valid session. Fetching `me` is a nicety; AuthGuard
+        // backfills the carbon on /chat if it's missing, so we always navigate.
+        authStore.setTokens(r.access, r.refresh);
+        track.loggedIn({ method: "otp" });
+        try {
+          const me = await api.me();
+          authStore.setCarbon(me);
+          toast.success(`welcome back, @${me.username}`);
+        } catch {
+          toast.success("welcome back");
+        }
+        router.replace("/chat");
+      } catch (e) {
+        // Mirror the failure into the OTP field's aria-live region, then
+        // re-throw so `wrap` still surfaces the toast for sighted users.
+        setOtpError(e instanceof ApiError ? e.message : "That code didn't work. Try again.");
+        throw e;
+      } finally {
+        // Release the lock so a wrong-code retry (which stays on this screen)
+        // can verify again. On success we've already navigated away.
+        verifyingRef.current = false;
+      }
     });
+  };
 
   const reset = () => {
     setPhase("identify");
@@ -221,6 +281,18 @@ function LoginPageInner() {
                 placeholder="555 123 4567"
                 value={number}
                 onChange={(e) => setNumber(e.target.value)}
+                onPaste={(e) => {
+                  // Normalize pasted E.164/international input so we don't
+                  // double the country code ("+1 415…" → "+114155…") or keep a
+                  // national trunk "0". May also switch the selected country if
+                  // the paste carries its own "+<code>".
+                  const text = e.clipboardData.getData("text");
+                  if (!text.trim()) return;
+                  e.preventDefault();
+                  const { country: c, number: n } = normalizePhonePaste(text, country);
+                  setCountry(c);
+                  setNumber(n);
+                }}
                 onKeyDown={(e) => e.key === "Enter" && number.trim() && start()}
               />
             </div>
@@ -267,7 +339,17 @@ function LoginPageInner() {
         <section className="space-y-4">
           <div className="space-y-4">
             <Label>verification code</Label>
-            <OtpInput value={code} onChange={setCode} autoFocus onComplete={(v) => verify(v)} />
+            <OtpInput
+              value={code}
+              onChange={(v) => {
+                setCode(v);
+                if (otpError) setOtpError(""); // clear stale error as they edit
+              }}
+              autoFocus
+              disabled={loading}
+              error={otpError}
+              onComplete={(v) => verify(v)}
+            />
             <ResendRow resend={resend} onResend={doResend} loading={loading} />
           </div>
           <Button onClick={() => verify()} disabled={code.length !== 6 || loading} className="w-full">

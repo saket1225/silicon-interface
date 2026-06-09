@@ -14,7 +14,7 @@ import {
 } from "@/lib/notifications";
 import { roomDisplay } from "@/lib/peers";
 import { playReceived } from "@/lib/sounds";
-import type { Contact, Event, Room } from "@/lib/types";
+import type { Contact, Event, Room, WsFrame } from "@/lib/types";
 import { useChatSocket } from "@/lib/ws";
 import { useTeams } from "@/lib/use-teams";
 import { contactKey, useContacts } from "@/lib/use-contacts";
@@ -132,7 +132,30 @@ function ChatPageInner() {
   // Hover-to-switch while dragging a file over a sidebar row.
   const [hoverRoomId, setHoverRoomId] = React.useState<string | null>(null);
   const hoverTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
-  const socket = useChatSocket();
+
+  // ---- WS frame fan-out (QA §2.1) ----
+  // Every consumer — this page's sidebar / sound / notification logic AND the
+  // open RoomView — must observe EVERY frame. The previous design had both read
+  // a single `lastFrame` STATE value, so when two frames landed in one React
+  // tick (a stream burst, a reconnect replay) only the last was seen and the
+  // intermediate one (a delta, a read receipt, a take-back) was silently lost.
+  // We now drive everything off the socket's `onFrame` callback and fan it out
+  // to a set of listeners, so no frame is ever coalesced away.
+  const frameListenersRef = React.useRef<Set<(f: WsFrame) => void>>(new Set());
+  const subscribeFrames = React.useCallback((fn: (f: WsFrame) => void) => {
+    frameListenersRef.current.add(fn);
+    return () => {
+      frameListenersRef.current.delete(fn);
+    };
+  }, []);
+  // This page's own per-frame handler, reassigned every render (below) so it
+  // always closes over the latest state without re-subscribing the socket.
+  const pageFrameRef = React.useRef<(f: WsFrame) => void>(() => {});
+  const dispatchFrame = React.useCallback((f: WsFrame) => {
+    pageFrameRef.current(f);
+    for (const fn of frameListenersRef.current) fn(f);
+  }, []);
+  const socket = useChatSocket({ onFrame: dispatchFrame });
   const { teams } = useTeams();
   const { carbon } = useAuth();
   const ownerId = carbon?.carbon_id ?? null;
@@ -181,9 +204,6 @@ function ChatPageInner() {
   React.useEffect(() => {
     selectedRef.current = selected;
   }, [selected]);
-  // Event ids already folded into the sidebar — guards against double-counting
-  // if the effect re-runs for the same frame.
-  const processedRef = React.useRef<Set<string>>(new Set());
   const roomsCacheOwnerRef = React.useRef<string | null>(null);
 
   const clearHover = React.useCallback(() => {
@@ -316,13 +336,14 @@ function ChatPageInner() {
   // last-message preview and unread count in place so a new message shows
   // instantly — even when that chat isn't open. Unknown rooms (and #2's
   // room.added) trigger a refetch so brand-new conversations surface too.
+  // Kept current via a deps-less effect so it always sees the latest closures;
+  // invoked by `dispatchFrame` for every WS frame (QA §2.1). Because `onFrame`
+  // delivers each frame exactly once we no longer need the unbounded
+  // `processedRef` dedup set the old `lastFrame` effect carried (QA §2.9).
   React.useEffect(() => {
-    const f = socket.lastFrame;
-    if (!f) return;
+    pageFrameRef.current = (f: WsFrame) => {
     if (f.type === "event") {
       const ev = f.event;
-      if (processedRef.current.has(ev.event_id)) return;
-      processedRef.current.add(ev.event_id);
       const mine = !!ev.sender_handle && ev.sender_handle === myUsername;
       // Received-message sound — global (any room), once per event.
       if (!mine && isCountableEvent(ev)) playReceived();
@@ -412,7 +433,8 @@ function ChatPageInner() {
     } else if (f.type === "room.added") {
       if (!roomsRef.current.some((r) => r.room_id === f.room_id)) void refresh();
     }
-  }, [socket.lastFrame, refresh, myUsername, ownerId, contacts.byPeer, router]);
+    };
+  });
 
   // Esc closes the open conversation (back to the list / welcome pane). We
   // bail when the event was already handled — an open dialog, popover, emoji
@@ -549,9 +571,10 @@ function ChatPageInner() {
                   <IdAvatar
                     seed={`team:${team.slug}`}
                     src={team.logo_url}
-                    size={32}
+                    size={28}
+                    family="team"
                     className={cn(
-                      "border-0",
+                      "m-0.5 border-0",
                       activeTeamSlug === team.slug ? "bg-background" : "bg-muted",
                     )}
                   />
@@ -615,7 +638,7 @@ function ChatPageInner() {
           key={selectedRoom.room_id}
           room={selectedRoom}
           allRooms={rooms}
-          socket={socket}
+          socket={{ ready: socket.ready, send: socket.send, subscribe: subscribeFrames }}
           contacts={contacts.byPeer}
           onContactsChanged={contacts.refresh}
         />

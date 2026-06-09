@@ -78,7 +78,10 @@
   --secondary:            #e3ddd2; /* darker beige — bubbles, chips */
   --secondary-foreground: #1a1a1a;
   --muted:                #e3ddd2;
-  --muted-foreground:     #666666;
+  /* Darkened from #666 (~4.7:1) to a warm-tinted near-charcoal for AA at small
+     sizes — the 10–11px mono labels need ≥4.5:1. #5d5953 ≈ 5.7:1 on the beige
+     canvas and keeps a faint warmth so it doesn't read as cold gray. */
+  --muted-foreground:     #5d5953;
   --accent:               #e5e0d7; /* hover wash */
   --accent-foreground:    #1a1a1a;
   /* received-message bubble — a notch lighter than the canvas so messages
@@ -86,9 +89,12 @@
   --bubble-received:      #f4f0e7;
 
   /* --- semantic --- */
-  --destructive:          #b85c5c; /* muted red */
+  /* Darkened for AA as text on the beige canvas (old values ~3:1 failed).
+     #9a3f3f ≈ 5.5:1 on bg and 5.5:1 for cream text on the button fill;
+     #2d6b41 ≈ 5.2:1 on bg — both still warm/muted, not garish. */
+  --destructive:          #9a3f3f; /* muted red — AA as text */
   --destructive-foreground: #ede8e0;
-  --success:              #5a9a6b; /* verified green */
+  --success:              #2d6b41; /* verified green — AA as text */
   --warning:              #c9b99a; /* tan */
 
   /* --- lines & focus --- */
@@ -221,11 +227,14 @@ summary,
 }
 
 /* Route transitions — every route is wrapped in <div class="page-enter"> by
-   app/template.tsx, which remounts on each navigation. Pages that want their
-   children to land in cascade get .stagger-fade-in on a wrapper. */
+   app/template.tsx, which remounts on each navigation. Opacity-only: the old
+   translateY(6px) nudged layout (CLS) on every room switch. A pure fade reads
+   as a gentle settle without shifting content, and is disabled entirely under
+   prefers-reduced-motion below. Pages that want their children to land in
+   cascade get .stagger-fade-in on a wrapper. */
 @keyframes page-fade-in {
-  from { opacity: 0; transform: translateY(6px); }
-  to   { opacity: 1; transform: translateY(0); }
+  from { opacity: 0; }
+  to   { opacity: 1; }
 }
 .page-enter {
   animation: page-fade-in 0.32s ease-out both;
@@ -329,11 +338,23 @@ summary,
   50%, 100% { opacity: 0; }
 }
 
+/* WCAG 2.3.3 (Animation from Interactions): honor prefers-reduced-motion across
+   ALL non-essential motion, not just the silicon-activity indicator. The
+   page/stagger/notice enter animations carry transform + opacity motion; under
+   reduced-motion we drop the animation so content appears immediately (opacity
+   forced to 1, no transform), and we still the looping activity indicator. */
 @media (prefers-reduced-motion: reduce) {
   .silicon-activity-line,
   .silicon-activity-core span,
   .silicon-activity-copy::after {
     animation: none;
+  }
+  .page-enter,
+  .stagger-fade-in > *,
+  .notice-fade-in {
+    animation: none;
+    opacity: 1;
+    transform: none;
   }
 }
 

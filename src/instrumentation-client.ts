@@ -4,13 +4,42 @@
 // apiKey=...> (that would double-init); components read the singleton with
 // `import posthog from "posthog-js"`.
 //
-// Config posture: capture *everything*. Session replay records the full UI
-// (including private chat content), all inputs, canvas, console logs and
-// network timing. This is intentional per product decision — dial back the
-// `session_recording` masking options below if the data policy changes.
+// Config posture: capture product analytics broadly, but session replay is
+// PRIVACY-HARDENED. High-ticket / GDPR-sensitive clients must never have a
+// live bearer token, OTP code, or private DM content liftable from a replay.
+// Concretely that means: inputs are masked, chat surfaces are masked
+// (`[data-private]`, applied to the message list), console capture is off (it
+// can echo tokens from debug logs), and the auth/silicon-key headers + request
+// & response bodies are stripped from captured network requests. Network
+// *timing* is still kept (it lives in performance capture, not the replay body).
 import posthog from "posthog-js";
+import type { CapturedNetworkRequest } from "posthog-js";
 
 const token = process.env.NEXT_PUBLIC_POSTHOG_PROJECT_TOKEN;
+
+// Header names that must never reach a replay. Compared case-insensitively.
+const SENSITIVE_HEADERS = ["authorization", "x-silicon-key", "cookie", "set-cookie"];
+
+function redactHeaders(headers: Record<string, string> | undefined) {
+  if (!headers) return headers;
+  for (const key of Object.keys(headers)) {
+    if (SENSITIVE_HEADERS.includes(key.toLowerCase())) headers[key] = "[redacted]";
+  }
+  return headers;
+}
+
+// Strip credentials and bodies from every captured request. We keep the URL +
+// timing (useful for perf debugging) but drop payloads, which routinely carry
+// tokens, OTP codes, message contents, and PII.
+function maskNetworkRequest(
+  request: CapturedNetworkRequest,
+): CapturedNetworkRequest | null | undefined {
+  request.requestHeaders = redactHeaders(request.requestHeaders);
+  request.responseHeaders = redactHeaders(request.responseHeaders);
+  if (request.requestBody != null) request.requestBody = "[redacted]";
+  if (request.responseBody != null) request.responseBody = "[redacted]";
+  return request;
+}
 
 if (token) {
   posthog.init(token, {
@@ -31,21 +60,26 @@ if (token) {
     // ---- error tracking ----
     capture_exceptions: true, // unhandled errors + rejections + console.error
 
-    // ---- session replay: maximal detail, no masking ----
+    // ---- session replay: privacy-hardened (see header note) ----
     disable_session_recording: false,
-    enable_recording_console_log: true,
+    enable_recording_console_log: false, // console can echo tokens — never record
     session_recording: {
-      maskAllInputs: false, // record what users type
-      maskTextSelector: undefined, // record all rendered text
-      maskInputOptions: { password: true }, // never record password fields
+      maskAllInputs: true, // never record what users type (composer, OTP, forms)
+      maskTextSelector: "[data-private]", // mask chat content (tagged on the message list)
+      maskInputOptions: { password: true }, // belt-and-suspenders on password fields
       recordCrossOriginIframes: true,
       collectFonts: true,
       captureCanvas: { recordCanvas: true }, // record <canvas> elements
-      // Capture network request/response headers + bodies in the replay.
+      // Headers + bodies are still captured, but scrubbed of credentials and
+      // payloads by maskNetworkRequestFn below before they leave the browser.
       recordHeaders: true,
       recordBody: true,
+      maskCapturedNetworkRequestFn: maskNetworkRequest,
     },
 
     debug: process.env.NODE_ENV === "development",
   });
+  // §4.2 — honour a returning user's analytics opt-out immediately, before any
+  // autocapture/pageview fires.
+  void import("./lib/analytics").then((m) => m.applyAnalyticsConsent());
 }

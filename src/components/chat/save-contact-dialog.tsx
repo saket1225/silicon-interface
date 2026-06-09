@@ -5,6 +5,7 @@ import { Camera, CircleNotch } from "@phosphor-icons/react/dist/ssr";
 import { toast } from "sonner";
 
 import { api, ApiError } from "@/lib/api";
+import { validateImageFile } from "@/lib/image-upload";
 import type { Contact, RoomPeer } from "@/lib/types";
 
 import { Button } from "@/components/ui/button";
@@ -36,6 +37,9 @@ export function SaveContactDialog({ open, onOpenChange, peer, existing, onSaved 
   const [photoKey, setPhotoKey] = React.useState("");
   const [photoUrl, setPhotoUrl] = React.useState<string | null>(null);
   const [busy, setBusy] = React.useState(false);
+  // QA §7.2: contacts could never be removed. `confirmRemove` flips the footer
+  // into a two-step confirm so a destructive delete is never a single misclick.
+  const [confirmRemove, setConfirmRemove] = React.useState(false);
   const fileRef = React.useRef<HTMLInputElement>(null);
 
   // Seed the form whenever it opens.
@@ -45,15 +49,23 @@ export function SaveContactDialog({ open, onOpenChange, peer, existing, onSaved 
     setNote(existing?.note ?? "");
     setPhotoKey("");
     setPhotoUrl(existing?.photo_url ?? peer.profile_photo_url ?? null);
+    setConfirmRemove(false);
   }, [open, existing, peer]);
 
   const customPhoto = photoKey !== "" || (existing?.custom_photo ?? false);
 
   const onUpload = async (file: File) => {
+    // QA §7.5: reject oversized / non-image / empty-type files before presign
+    // instead of relabeling them "image/png" and uploading something broken.
+    const v = validateImageFile(file);
+    if (!v.ok) {
+      toast.error(v.error ?? "unsupported image");
+      return;
+    }
     setBusy(true);
     try {
       const r = await api.presignUpload({
-        mime: file.type || "image/png",
+        mime: file.type,
         size: file.size,
         kind: "profile_icon",
         filename: file.name,
@@ -96,6 +108,23 @@ export function SaveContactDialog({ open, onOpenChange, peer, existing, onSaved 
     }
   };
 
+  // QA §7.2: delete the saved contact (api.deleteContact previously had zero
+  // call sites). onSaved() re-fetches so the room falls back to defaults.
+  const remove = async () => {
+    if (!existing) return;
+    setBusy(true);
+    try {
+      await api.deleteContact(existing.id);
+      toast.success("contact removed");
+      onSaved();
+      onOpenChange(false);
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-sm">
@@ -117,7 +146,7 @@ export function SaveContactDialog({ open, onOpenChange, peer, existing, onSaved 
               className="group relative"
               aria-label="set contact picture"
             >
-              <IdAvatar seed={peer.id} src={photoUrl} size={72} />
+              <IdAvatar seed={peer.id} src={photoUrl} size={72} family={peer.kind} />
               <span className="absolute inset-0 flex items-center justify-center bg-foreground/0 opacity-0 transition-opacity group-hover:bg-foreground/30 group-hover:opacity-100">
                 <Camera className="h-5 w-5 text-background" />
               </span>
@@ -168,6 +197,46 @@ export function SaveContactDialog({ open, onOpenChange, peer, existing, onSaved 
               rows={3}
             />
           </div>
+
+          {/* Remove (edit mode only) lives on its own row with an inline
+              two-step confirm so a destructive delete is never a misclick. */}
+          {existing && (
+            confirmRemove ? (
+              <div className="flex items-center justify-between gap-2 border border-destructive/40 bg-destructive/5 px-3 py-2">
+                <span className="text-xs text-muted-foreground">
+                  Remove this contact?
+                </span>
+                <div className="flex gap-2">
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    onClick={() => setConfirmRemove(false)}
+                    disabled={busy}
+                  >
+                    keep
+                  </Button>
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={remove}
+                    disabled={busy}
+                  >
+                    {busy && <CircleNotch className="animate-spin" />}
+                    remove
+                  </Button>
+                </div>
+              </div>
+            ) : (
+              <button
+                type="button"
+                onClick={() => setConfirmRemove(true)}
+                disabled={busy}
+                className="text-left text-xs text-destructive transition-colors hover:underline disabled:opacity-50"
+              >
+                Remove contact
+              </button>
+            )
+          )}
 
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={busy}>

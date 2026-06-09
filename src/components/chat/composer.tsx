@@ -36,7 +36,7 @@ import { VoiceRecorder } from "@/components/chat/voice-recorder";
 function xhrUpload(
   url: string,
   form: FormData,
-  onProgress: (pct: number) => void,
+  onProgress: (pct: number, loaded: number) => void,
   xhrRef: React.MutableRefObject<XMLHttpRequest | null>,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -44,7 +44,10 @@ function xhrUpload(
     xhrRef.current = xhr;
     xhr.open("POST", url);
     xhr.upload.onprogress = (e) => {
-      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100));
+      // Report the *real* loaded byte count alongside the percent so the UI's
+      // "X / Y" label reflects actual progress, not a count derived from a
+      // rounded percentage.
+      if (e.lengthComputable) onProgress(Math.round((e.loaded / e.total) * 100), e.loaded);
     };
     const clear = () => {
       xhrRef.current = null;
@@ -108,6 +111,30 @@ const EMOJI_LIMIT = EMOJI_COLS * 4; // 4 rows
 const SILICON_TEXT_SEND_DELAY_MS = 5000;
 const CONTINUING_DRAFT_MIN_CHARS = 2;
 
+// §6.6 — Up-front file validation, before we even ask for a presigned URL.
+// A sane cap keeps a 5 GB drop from OOM-ing the metadata decode / hanging the
+// upload; a zero-byte guard stops empty files; and we refuse types the bubble
+// has no way to render so the user gets a clear toast instead of a broken tile.
+const MAX_FILE_BYTES = 100 * 1024 * 1024; // 100 MB
+
+/** HEIC/HEIF aren't renderable as <img> in most browsers — treat them as a
+ *  generic file rather than a broken image (and warn so the user isn't
+ *  surprised it shows as a chip, not a thumbnail). */
+function isHeic(file: File): boolean {
+  const t = (file.type || "").toLowerCase();
+  if (t === "image/heic" || t === "image/heif") return true;
+  return /\.(heic|heif)$/i.test(file.name || "");
+}
+
+/** Returns an error string if the file can't be attached, or null if it's OK. */
+function validateFile(file: File): string | null {
+  if (file.size === 0) return "that file is empty (0 bytes).";
+  if (file.size > MAX_FILE_BYTES) {
+    return `that file is too large (max ${Math.round(MAX_FILE_BYTES / 1024 / 1024)} MB).`;
+  }
+  return null;
+}
+
 interface QueuedTextSend {
   clientId: string;
   body: string;
@@ -123,11 +150,14 @@ interface QueuedTextSend {
 function StagedAttachment({
   file,
   uploadPct,
+  uploadLoaded,
   onRemove,
 }: {
   file: File;
   /** 0–100 while uploading; null/undefined when idle. */
   uploadPct?: number | null;
+  /** Real bytes uploaded so far (from the XHR progress event). */
+  uploadLoaded?: number | null;
   onRemove: () => void;
 }) {
   const isImage = file.type.startsWith("image/");
@@ -172,7 +202,7 @@ function StagedAttachment({
         <div className="truncate text-xs font-medium">{file.name}</div>
         <div className="label-mono text-[10px] text-muted-foreground">
           {uploading
-            ? `${formatBytes((file.size * (uploadPct ?? 0)) / 100)} / ${formatBytes(file.size)} (${uploadPct}%)`
+            ? `${formatBytes(uploadLoaded ?? (file.size * (uploadPct ?? 0)) / 100)} / ${formatBytes(file.size)} (${uploadPct}%)`
             : formatBytes(file.size)}
         </div>
       </div>
@@ -267,12 +297,49 @@ export function Composer({
 }: Props) {
   const [text, setText] = React.useState("");
   const [file, setFile] = React.useState<File | null>(null);
+  // Mirror of `file` so `attachFile` can guard against replacing an in-flight
+  // attachment without taking `file` as a dependency (which would re-create the
+  // callback on every staged change).
+  const fileRef = React.useRef<File | null>(null);
+  React.useEffect(() => {
+    fileRef.current = file;
+  }, [file]);
   const [recording, setRecording] = React.useState(false);
+  // §6.5 — Mirror `recording` in a ref so the unmount cleanup can clear a
+  // dangling "recording…" beacon for the *current* room even if the room
+  // switches while we're mid-record.
+  const recordingRef = React.useRef(false);
+  React.useEffect(() => {
+    recordingRef.current = recording;
+  }, [recording]);
+  React.useEffect(
+    () => () => {
+      // On unmount (e.g. switching rooms while recording), explicitly clear the
+      // peer "recording…" beacon — otherwise it sticks until it times out
+      // server-side. The VoiceRecorder's own cleanup stops the MediaStream.
+      if (recordingRef.current) {
+        api.activity(roomId, "recording", false).catch(() => undefined);
+      }
+    },
+    [roomId],
+  );
   const [busy, setBusy] = React.useState(false);
   // Upload progress (0–100) while a staged file is sending; null when idle.
   const [uploadPct, setUploadPct] = React.useState<number | null>(null);
+  // Real bytes uploaded so far — drives the "X / Y" label instead of deriving
+  // it from a rounded percent.
+  const [uploadLoaded, setUploadLoaded] = React.useState<number | null>(null);
   const [confirmCancel, setConfirmCancel] = React.useState(false);
   const xhrRef = React.useRef<XMLHttpRequest | null>(null);
+  // §6.3/§6.4 — Voice-note upload state. We surface progress + an abort
+  // control during the upload, and retain the recorded blob if it fails so the
+  // user can retry instead of losing the recording.
+  const voiceXhrRef = React.useRef<XMLHttpRequest | null>(null);
+  const [voiceUploadPct, setVoiceUploadPct] = React.useState<number | null>(null);
+  const [pendingVoice, setPendingVoice] = React.useState<{
+    blob: Blob;
+    durationMs: number;
+  } | null>(null);
   // The attached file uploads in the background as soon as it's staged; `send`
   // then just posts the message referencing the ready media.
   const [uploadStatus, setUploadStatus] = React.useState<
@@ -303,8 +370,53 @@ export function Composer({
     xhrRef.current?.abort();
     setConfirmCancel(false);
     setUploadPct(null);
+    setUploadLoaded(null);
     setFile(null);
   };
+
+  // §6.6 / §6.7 — Single entry point for staging an attachment, whether it
+  // arrives from the picker, a drag-drop, or a paste. It validates up front,
+  // refuses to silently replace an in-flight upload, and warns on HEIC.
+  const attachFile = React.useCallback(
+    (next: File | null) => {
+      if (!next) {
+        setFile(null);
+        return;
+      }
+      // §6.7 — One file at a time. If something is already staged/uploading,
+      // surface a clear message instead of silently aborting the first.
+      if (fileRef.current) {
+        toast.error("one file at a time — send or remove the current attachment first.");
+        return;
+      }
+      const err = validateFile(next);
+      if (err) {
+        toast.error(err);
+        return;
+      }
+      // §6.6 — HEIC can't render as a normal image; let the user know it'll
+      // attach as a file chip rather than show a (broken) thumbnail.
+      if (isHeic(next)) {
+        toast.message("HEIC photo attached as a file (browsers can't preview it inline).");
+      }
+      setFile(next);
+    },
+    [],
+  );
+
+  // §6.7 — Multi-file selection (picker or drop) can only keep one; tell the
+  // user the rest were ignored instead of dropping them silently.
+  const attachFromList = React.useCallback(
+    (list: FileList | File[] | null | undefined) => {
+      const files = list ? Array.from(list) : [];
+      if (files.length === 0) return;
+      if (files.length > 1) {
+        toast.message(`attaching the first of ${files.length} files — one at a time.`);
+      }
+      attachFile(files[0] ?? null);
+    },
+    [attachFile],
+  );
   // #21 — Emoji picker triggered by `:` followed by alphanumerics. We track
   // the active token (':grin', ':lol', …) and surface matches in a small
   // popover anchored to the textarea.
@@ -316,10 +428,10 @@ export function Composer({
   // ownership.
   React.useEffect(() => {
     if (droppedFile) {
-      setFile(droppedFile);
+      attachFile(droppedFile);
       onDroppedFileConsumed?.();
     }
-  }, [droppedFile, onDroppedFileConsumed]);
+  }, [droppedFile, onDroppedFileConsumed, attachFile]);
 
   // Clicking "reply" on a message sets a reply target — focus the input right
   // away so the user can start typing without a second click.
@@ -335,6 +447,7 @@ export function Composer({
       uploadedRef.current = null;
       setUploadStatus("idle");
       setUploadPct(null);
+      setUploadLoaded(null);
       return;
     }
     let cancelled = false;
@@ -353,10 +466,19 @@ export function Composer({
         const mediaId = r.media.media_id;
         if (!r.upload.dev_mode) {
           setUploadPct(0);
+          setUploadLoaded(0);
           const form = new FormData();
           for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
           form.append("file", file);
-          await xhrUpload(r.upload.url, form, setUploadPct, xhrRef);
+          await xhrUpload(
+            r.upload.url,
+            form,
+            (pct, loaded) => {
+              setUploadPct(pct);
+              setUploadLoaded(loaded);
+            },
+            xhrRef,
+          );
           // Decode metadata (#22 image dims; #6 audio/video duration) so the
           // bubble reserves the right aspect / shows duration immediately.
           let meta: Parameters<typeof api.mediaComplete>[1] = {};
@@ -376,9 +498,11 @@ export function Composer({
         uploadedRef.current = { mediaId, mime: file.type || "application/octet-stream" };
         setUploadStatus("ready");
         setUploadPct(null);
+        setUploadLoaded(null);
       } catch (e) {
         if (cancelled) return;
         setUploadPct(null);
+        setUploadLoaded(null);
         if (e instanceof DOMException && e.name === "AbortError") {
           setUploadStatus("idle");
         } else {
@@ -517,7 +641,7 @@ export function Composer({
       clearDelayedQueue();
       if (ackClientId) onOptimisticUpdate?.(ackClientId, payload);
       try {
-        const real = await api.sendEvent(roomId, payload);
+        const real = await api.sendEvent(roomId, payload, ackClientId); // §2.3
         if (optimistic && ackClientId) onAck(ackClientId, real);
         track.messageSent({
           room_id: roomId,
@@ -582,7 +706,7 @@ export function Composer({
       clearDelayTimer();
       const payload = buildQueuedPayload(queued);
       delayedTextQueueRef.current = [];
-      api.sendEvent(roomId, payload).catch((err) => {
+      api.sendEvent(roomId, payload, queued[0]?.clientId).catch((err) => {
         toast.error(err instanceof ApiError ? err.message : String(err));
       });
     },
@@ -598,7 +722,7 @@ export function Composer({
     };
     onOptimisticAdd(clientId, payload);
     api
-      .sendEvent(roomId, payload)
+      .sendEvent(roomId, payload, clientId) // §2.3 — echo-match by client id
       .then((real) => onAck(clientId, real))
       .catch((err) => onFail(clientId, err));
     track.messageSent({
@@ -659,8 +783,7 @@ export function Composer({
 
   // ----- Voice recording -----
 
-  const onVoiceSubmit = async (blob: Blob, durationMs: number) => {
-    setRecording(false);
+  const uploadVoice = async (blob: Blob, durationMs: number) => {
     // Show the voice note instantly (with a pending clock) — don't make the
     // user stare at nothing while it uploads.
     const clientId = newClientId();
@@ -686,7 +809,6 @@ export function Composer({
         return peaks;
       })
       .catch(() => null);
-    api.activity(roomId, "recording", false).catch(() => undefined);
     api.activity(roomId, "uploading", true).catch(() => undefined);
     setBusy(true);
     try {
@@ -703,8 +825,11 @@ export function Composer({
         const form = new FormData();
         for (const [k, v] of Object.entries(r.upload.fields)) form.append(k, v);
         form.append("file", blob, filename);
-        const up = await fetch(r.upload.url, { method: "POST", body: form });
-        if (!up.ok) throw new Error(`upload failed (${up.status})`);
+        // §6.3 — Route the voice upload through the same xhr-with-progress +
+        // abort path the file picker uses, so a long note on a slow uplink
+        // shows progress and can be cancelled instead of an inert spinner.
+        setVoiceUploadPct(0);
+        await xhrUpload(r.upload.url, form, setVoiceUploadPct, voiceXhrRef);
       }
       // #6 — Send the peaks we computed during recording (durationMs is
       // already known; the recorder reports it). This runs for dev uploads too
@@ -714,23 +839,51 @@ export function Composer({
         duration_ms: peaks?.duration_ms || durationMs,
         ...(peaks ? { peaks: peaks.peaks } : {}),
       });
-      const real = await api.sendEvent(roomId, {
-        type: "m.voice",
-        content: {
-          media_id: mediaId,
-          mime,
-          duration_ms: peaks?.duration_ms || durationMs,
+      const real = await api.sendEvent(
+        roomId,
+        {
+          type: "m.voice",
+          content: {
+            media_id: mediaId,
+            mime,
+            duration_ms: peaks?.duration_ms || durationMs,
+          },
         },
-      });
+        clientId, // §2.3
+      );
       onAck(clientId, real);
-      URL.revokeObjectURL(localUrl);
+      // §6.4 — Succeeded: the recording is safely on the server, so drop the
+      // retained blob.
+      setPendingVoice(null);
       track.messageSent({ room_id: roomId, message_type: "m.voice", has_attachment: true });
     } catch (e) {
       onFail(clientId, e);
+      // §6.4 — A user-initiated abort isn't a failure to recover from; just
+      // drop it. Any *real* failure retains the blob so the user can retry
+      // instead of losing an unrecoverable recording (the blob URL was the
+      // only handle to the audio).
+      if (e instanceof DOMException && e.name === "AbortError") {
+        setPendingVoice(null);
+      } else {
+        setPendingVoice({ blob, durationMs });
+        toast.error("voice note failed to send — tap retry to try again.");
+      }
     } finally {
       setBusy(false);
+      setVoiceUploadPct(null);
+      voiceXhrRef.current = null;
+      // §6.4 — Revoke the object URL in `finally` regardless of outcome. The
+      // optimistic bubble has already captured the bytes it needs (peaks +
+      // duration); leaving the URL live leaked blob memory on every failure.
+      URL.revokeObjectURL(localUrl);
       api.activity(roomId, "uploading", false).catch(() => undefined);
     }
+  };
+
+  const onVoiceSubmit = (blob: Blob, durationMs: number) => {
+    setRecording(false);
+    api.activity(roomId, "recording", false).catch(() => undefined);
+    void uploadVoice(blob, durationMs);
   };
 
   // Render the recorder in place of the textarea row when active.
@@ -782,12 +935,65 @@ export function Composer({
         <StagedAttachment
           file={file}
           uploadPct={uploadPct}
+          uploadLoaded={uploadLoaded}
           onRemove={() => {
             // Mid-upload, the cross asks for confirmation before aborting.
             if (uploadPct !== null) setConfirmCancel(true);
             else setFile(null);
           }}
         />
+      )}
+      {/* §6.3 — Voice upload progress + abort. */}
+      {voiceUploadPct !== null && (
+        <div className="flex items-center gap-3 border bg-card px-3 py-2 text-xs">
+          <Microphone className="h-4 w-4 shrink-0 text-muted-foreground" />
+          <div className="min-w-0 flex-1">
+            <div className="label-mono text-[10px] text-muted-foreground">
+              sending voice note… {voiceUploadPct}%
+            </div>
+            <div className="mt-1 h-0.5 w-full bg-muted">
+              <div
+                className="h-full bg-primary transition-all"
+                style={{ width: `${voiceUploadPct}%` }}
+              />
+            </div>
+          </div>
+          <Button
+            size="icon"
+            variant="ghost"
+            onClick={() => voiceXhrRef.current?.abort()}
+            aria-label="cancel voice upload"
+          >
+            <X className="h-3.5 w-3.5" />
+          </Button>
+        </div>
+      )}
+      {/* §6.4 — A failed voice note is retained; offer retry / discard so the
+          recording isn't lost to a transient network blip. */}
+      {pendingVoice && voiceUploadPct === null && (
+        <div className="flex items-center justify-between gap-3 border border-destructive/40 bg-card px-3 py-2 text-xs">
+          <span className="min-w-0 text-destructive">voice note didn&apos;t send.</span>
+          <div className="flex shrink-0 items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                const v = pendingVoice;
+                setPendingVoice(null);
+                void uploadVoice(v.blob, v.durationMs);
+              }}
+              className="font-medium text-foreground underline-offset-2 hover:underline"
+            >
+              retry
+            </button>
+            <button
+              type="button"
+              onClick={() => setPendingVoice(null)}
+              className="text-muted-foreground hover:text-foreground"
+            >
+              discard
+            </button>
+          </div>
+        </div>
       )}
       {queuePaused && queuedTextCount > 0 && (
         <div className="flex items-center justify-between gap-3 border border-input bg-muted/50 px-2 py-1 text-xs text-muted-foreground">
@@ -809,8 +1015,14 @@ export function Composer({
         <input
           type="file"
           ref={fileInputRef}
+          multiple
           className="hidden"
-          onChange={(e) => setFile(e.target.files?.[0] || null)}
+          onChange={(e) => {
+            attachFromList(e.target.files);
+            // Reset so picking the same file again still fires onChange, and a
+            // rejected pick doesn't leave a stale selection on the input.
+            e.target.value = "";
+          }}
         />
         <button
           type="button"
@@ -833,9 +1045,13 @@ export function Composer({
               persistDraft(v);
               if (v) beaconTyping();
               // Detect a `:foo` token at the caret. If found, open picker.
+              // The `(?<![\w])` lookbehind stops the trigger firing inside
+              // times/ratios like `12:30` or URLs like `http://` — the colon
+              // must follow whitespace or the start of the line, not a word
+              // character, to be treated as an emoji shortcode start.
               const caret = e.target.selectionStart ?? v.length;
               const upTo = v.slice(0, caret);
-              const m = upTo.match(/:([a-z0-9_+\-]*)$/i);
+              const m = upTo.match(/(?<![\w]):([a-z0-9_+\-]*)$/i);
               if (m) {
                 setEmojiQuery(m[1] ?? "");
                 setEmojiIdx(0);
@@ -846,7 +1062,21 @@ export function Composer({
             placeholder="message…"
             rows={MIN_ROWS}
             className="min-h-11 resize-none bg-transparent px-3 py-2.5 text-sm outline-none placeholder:text-muted-foreground"
+            onPaste={(e) => {
+              // Paste a screenshot (or any file) to attach it. We only consume
+              // the event when the clipboard actually carries a file — a normal
+              // text paste falls through to the default behavior untouched.
+              const items = e.clipboardData?.files;
+              if (items && items.length > 0) {
+                e.preventDefault();
+                attachFromList(items);
+              }
+            }}
             onKeyDown={(e) => {
+              // §6.8 — Suppress all of the picker/send key handling while an
+              // IME is composing so a composition-commit Enter doesn't pick an
+              // emoji or send.
+              if (e.nativeEvent.isComposing || e.keyCode === 229) return;
               // Emoji picker keyboard navigation — true 2-D grid: ←/→ move one
               // cell, ↑/↓ move a whole row.
               if (emojiQuery !== null) {
@@ -908,6 +1138,12 @@ export function Composer({
                 return;
               }
               if (e.key === "Enter" && !e.shiftKey) {
+                // §6.8 — Don't send mid-IME-composition. While a CJK (or any)
+                // input method is composing, Enter *commits the candidate* —
+                // sending here would fire a half-composed message. `isComposing`
+                // is the modern signal; keyCode 229 is the legacy fallback some
+                // browsers still report during composition.
+                if (e.nativeEvent.isComposing || e.keyCode === 229) return;
                 e.preventDefault();
                 send();
               }

@@ -33,6 +33,9 @@ export interface Carbon {
   profile_photo_url: string | null;
   tagline: string;
   timezone: string;
+  // Core-team flag. Gates the /dev console client-side; the backend
+  // independently gates /api/v1/dev/* (DEBUG) and /api/v1/cost/* (IsAdminUser).
+  is_staff?: boolean;
   email_verified_at: string | null;
   phone_verified_at: string | null;
   created_at: string;

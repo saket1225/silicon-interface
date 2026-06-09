@@ -5,6 +5,17 @@ import { Pause, Play } from "@phosphor-icons/react/dist/ssr";
 
 import { cn } from "@/lib/utils";
 
+// Single-active-player coordination. Only one voice note should play at a time
+// — starting a new one pauses whichever was playing. A tiny module-level
+// registry of "pause me" callbacks keyed by a per-instance symbol is enough;
+// no context/provider needed for what is effectively a global audio bus.
+const activePausers = new Set<() => void>();
+function pauseAllExcept(self: () => void) {
+  for (const p of activePausers) {
+    if (p !== self) p();
+  }
+}
+
 interface Props {
   /** Presigned/permanent URL. May be null while still loading. */
   url: string | null;
@@ -32,6 +43,21 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
   const [playing, setPlaying] = React.useState(false);
   const [currentMs, setCurrentMs] = React.useState(0);
   const [internalDurMs, setInternalDurMs] = React.useState<number | null>(null);
+
+  // Register this instance's "pause me" callback in the global registry so a
+  // sibling player can pause us when it starts. Cleaned up on unmount.
+  const pauseSelfRef = React.useRef<() => void>(() => {});
+  React.useEffect(() => {
+    const pause = () => {
+      audioRef.current?.pause();
+      setPlaying(false);
+    };
+    pauseSelfRef.current = pause;
+    activePausers.add(pause);
+    return () => {
+      activePausers.delete(pause);
+    };
+  }, []);
 
   const bars = React.useMemo(() => {
     const TARGET = 40; // a count that fits the compact player at any width
@@ -107,6 +133,8 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
       a.pause();
       setPlaying(false);
     } else {
+      // Pause any other voice note before we start so two never overlap.
+      pauseAllExcept(pauseSelfRef.current);
       try {
         await a.play();
         setPlaying(true);
@@ -142,7 +170,7 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
       >
         {playing ? <Pause weight="fill" /> : <Play weight="fill" />}
       </button>
-      <Waveform bars={bars} progress={progress} onSeek={seekTo} />
+      <Waveform bars={bars} progress={progress} seekable={dur > 0} onSeek={seekTo} />
       <span className="shrink-0 label-mono text-[10px] opacity-60">
         {formatTime(currentMs)}/{formatTime(dur)}
       </span>
@@ -159,19 +187,38 @@ export function SiliconAudio({ url, peaks, durationMs, className }: Props) {
 function Waveform({
   bars,
   progress,
+  seekable,
   onSeek,
 }: {
   bars: number[];
   progress: number;
+  /** Whether duration is known yet — when false, seeking is a no-op so we
+   *  don't expose a focusable but dead control. */
+  seekable: boolean;
   onSeek: (frac: number) => void;
 }) {
   const ref = React.useRef<HTMLDivElement | null>(null);
   const handleClick = (e: React.MouseEvent<HTMLDivElement>) => {
     const el = ref.current;
-    if (!el) return;
+    if (!el || !seekable) return;
     const rect = el.getBoundingClientRect();
     const x = e.clientX - rect.left;
     onSeek(Math.max(0, Math.min(1, x / rect.width)));
+  };
+  // Keyboard scrubbing — the element already advertises role="slider", so it
+  // must be operable without a mouse. ←/→ step 5%, ↑/↓ step 5%, Home/End jump
+  // to the ends. We only handle keys once duration is known.
+  const STEP = 0.05;
+  const handleKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!seekable) return;
+    let next: number | null = null;
+    if (e.key === "ArrowRight" || e.key === "ArrowUp") next = progress + STEP;
+    else if (e.key === "ArrowLeft" || e.key === "ArrowDown") next = progress - STEP;
+    else if (e.key === "Home") next = 0;
+    else if (e.key === "End") next = 1;
+    if (next === null) return;
+    e.preventDefault();
+    onSeek(Math.max(0, Math.min(1, next)));
   };
   // Two identical bar rows stacked: a dim base, and a bright "played" copy
   // clipped to the exact progress fraction. Because both rows lay out the same
@@ -197,12 +244,19 @@ function Waveform({
     <div
       ref={ref}
       onClick={handleClick}
+      onKeyDown={handleKeyDown}
       role="slider"
       aria-label="audio scrubber"
       aria-valuemin={0}
       aria-valuemax={1}
       aria-valuenow={progress}
-      className="relative flex h-9 min-w-0 flex-1 cursor-pointer items-center"
+      aria-valuetext={`${Math.round(progress * 100)}%`}
+      aria-disabled={!seekable}
+      tabIndex={seekable ? 0 : -1}
+      className={cn(
+        "relative flex h-9 min-w-0 flex-1 items-center outline-none focus-visible:ring-1 focus-visible:ring-current",
+        seekable ? "cursor-pointer" : "cursor-default",
+      )}
     >
       {renderBars(false)}
       <div

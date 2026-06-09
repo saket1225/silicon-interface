@@ -14,18 +14,25 @@ const SILICON_KEY = "silicon-interface:silicon-key";
 // sessions survive the rebrand. Runs once at module load.
 function migrateLegacyKeys() {
   if (typeof window === "undefined") return;
-  const moves: [string, string][] = [
-    ["silicon-chat:access", ACCESS_KEY],
-    ["silicon-chat:refresh", REFRESH_KEY],
-    ["silicon-chat:carbon", CARBON_KEY],
-    ["silicon-chat:silicon-key", SILICON_KEY],
-  ];
-  for (const [oldKey, newKey] of moves) {
-    const v = window.localStorage.getItem(oldKey);
-    if (v != null && window.localStorage.getItem(newKey) == null) {
-      window.localStorage.setItem(newKey, v);
+  // localStorage access can throw in private mode / when storage is disabled.
+  // This runs at module load, so an unguarded throw here would brick the whole
+  // app (every page imports the auth store). Swallow it.
+  try {
+    const moves: [string, string][] = [
+      ["silicon-chat:access", ACCESS_KEY],
+      ["silicon-chat:refresh", REFRESH_KEY],
+      ["silicon-chat:carbon", CARBON_KEY],
+      ["silicon-chat:silicon-key", SILICON_KEY],
+    ];
+    for (const [oldKey, newKey] of moves) {
+      const v = window.localStorage.getItem(oldKey);
+      if (v != null && window.localStorage.getItem(newKey) == null) {
+        window.localStorage.setItem(newKey, v);
+      }
+      if (v != null) window.localStorage.removeItem(oldKey);
     }
-    if (v != null) window.localStorage.removeItem(oldKey);
+  } catch {
+    /* storage unavailable — nothing to migrate */
   }
 }
 migrateLegacyKeys();
@@ -38,12 +45,20 @@ function emit() {
 
 function safeGet(key: string): string | null {
   if (typeof window === "undefined") return null;
-  return window.localStorage.getItem(key);
+  try {
+    return window.localStorage.getItem(key);
+  } catch {
+    return null;
+  }
 }
 function safeSet(key: string, value: string | null) {
   if (typeof window === "undefined") return;
-  if (value == null) window.localStorage.removeItem(key);
-  else window.localStorage.setItem(key, value);
+  try {
+    if (value == null) window.localStorage.removeItem(key);
+    else window.localStorage.setItem(key, value);
+  } catch {
+    /* storage unavailable in private mode — best effort */
+  }
 }
 
 export const authStore = {

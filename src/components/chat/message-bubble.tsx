@@ -22,6 +22,7 @@ import { api } from "@/lib/api";
 import type { Event, ProgressState } from "@/lib/types";
 import { renderMarkdown } from "@/lib/markdown";
 import { cn, relativeTime } from "@/lib/utils";
+import { copyText } from "@/lib/clipboard";
 
 import { downloadAsset } from "./media-previewer";
 
@@ -158,6 +159,10 @@ export function MessageBubble({
   }
 
   const redacted = event.redacted_at !== null;
+  // §1.3 — only text/tts can stream; never show the pill for non-streamable
+  // types whose `is_final` happens to be false (e.g. a media event).
+  const mightStream =
+    (event.type === "m.text" || event.type === "m.tts") && !event.is_final;
   // Prefer the sender's handle (carbon username == carbon_id, or silicon name);
   // fall back to the kind only if we don't have it (e.g. system events).
   const senderLabel = senderDisplayName?.trim()
@@ -319,7 +324,7 @@ export function MessageBubble({
             minute) run, so a quick back-to-back exchange shows one common
             timestamp instead of one per line. Streaming indicator escapes
             the gate because it's a live state, not historical metadata. */}
-        {(showTime || !event.is_final) && (
+        {(showTime || mightStream) && (
           <div
             className={cn(
               "flex items-center gap-1.5 text-[10px] text-muted-foreground",
@@ -328,7 +333,7 @@ export function MessageBubble({
           >
             {showTime && <span>{relativeTime(event.created_at)}</span>}
             {showTime && isMine && status && <Receipt status={status} />}
-            {!event.is_final && <span className="text-primary">streaming…</span>}
+            {mightStream && <StreamingPill body={String(event.content.body ?? "")} />}
           </div>
         )}
       </div>
@@ -373,11 +378,11 @@ function BubbleActions({
   const canDelete = isMine && within5Min;
   const canTakeBack = isMine && isOwnSilicon;
   const textBody = event.type === "m.text" ? String(event.content.body ?? "") : "";
-  const handleCopy = () => {
-    navigator.clipboard.writeText(textBody).then(
-      () => toast.success("text copied"),
-      () => toast.error("couldn't copy"),
-    );
+  const handleCopy = async () => {
+    // §7.1 — copyText handles insecure contexts (LAN/http) with an execCommand
+    // fallback and only resolves true on a real copy.
+    if (await copyText(textBody)) toast.success("text copied");
+    else toast.error("couldn't copy");
   };
   // Media messages (voice/file/image/…) expose download here in the options
   // menu rather than inline next to the player.
@@ -561,6 +566,25 @@ ActionIconButton.displayName = "ActionIconButton";
  *   • read      → double ✓ in success green (peer issued a read_receipt)
  *   • failed    → a small alert (POST errored, retry on next send)
  */
+/**
+ * §1.3 — the "streaming…" pill, with IMPLICIT finalization. The server flips a
+ * stream to final with an `event.final` frame; if that frame is dropped (a
+ * reconnect gap, frame coalescing) the bubble would otherwise read "streaming…"
+ * forever even though the text is complete. We treat ~5s with no new delta as
+ * done and stop showing the pill.
+ */
+const STREAM_IDLE_MS = 5000;
+function StreamingPill({ body }: { body: string }) {
+  const [idle, setIdle] = React.useState(false);
+  React.useEffect(() => {
+    setIdle(false);
+    const t = window.setTimeout(() => setIdle(true), STREAM_IDLE_MS);
+    return () => window.clearTimeout(t);
+  }, [body]);
+  if (idle) return null;
+  return <span className="text-primary">streaming…</span>;
+}
+
 function Receipt({ status }: { status: MessageStatus }) {
   const title =
     status === "pending"
@@ -579,9 +603,12 @@ function Receipt({ status }: { status: MessageStatus }) {
   if (status === "pending")
     return <Clock className="h-3 w-3 opacity-60" aria-label={title} />;
   if (status === "delivered")
-    return <Checks className="h-3 w-3" aria-label={title} />;
+    return <Checks className="h-3 w-3 opacity-60" aria-label={title} />;
+  // §1.5 — "read" must be unmistakable vs "delivered" (the old pair differed
+  // only by text colour on a beige canvas). Use the brand success colour, full
+  // opacity — the confident "they saw it" beat every messenger gets right.
   if (status === "read")
-    return <Checks className="h-3 w-3 text-foreground" aria-label={title} />;
+    return <Checks className="h-3 w-3 text-[var(--success)]" aria-label={title} weight="bold" />;
   return <Check className="h-3 w-3" aria-label={title} />;
 }
 
@@ -652,16 +679,25 @@ function Body({ event }: { event: Event }) {
   const forwarded = (c as { forward_from?: { sender_handle?: string } }).forward_from;
   const forwardedFrom = forwarded?.sender_handle ?? null;
   switch (event.type) {
-    case "m.text":
+    case "m.text": {
+      // §2.8 — a silicon can emit an empty/whitespace m.text; don't render a
+      // blank padded bubble. Show a quiet placeholder only once it's final and
+      // there's nothing else to show (no link preview, not mid-stream).
+      const body = String(c.body ?? "");
+      const blank = !body.trim() && !event.link_preview;
+      if (blank && event.is_final) {
+        return <span className="text-xs italic text-muted-foreground">(empty message)</span>;
+      }
       return (
         <div className="space-y-1">
           {forwardedFrom && <ForwardedFromChip handle={forwardedFrom} />}
           <div className="whitespace-pre-wrap break-words">
-            {renderMarkdown(String(c.body ?? ""))}
+            {renderMarkdown(body)}
             {event.link_preview && <LinkPreviewCard preview={event.link_preview} />}
           </div>
         </div>
       );
+    }
     case "m.image":
       return c.media_id ? (
         <div className="space-y-1.5">

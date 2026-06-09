@@ -115,6 +115,7 @@ export function RoomList({
                     seed={avatarSeed}
                     src={avatarSrc}
                     size={36}
+                    family={peer?.kind ?? "carbon"}
                     className="mt-0.5"
                   />
                   <div className="min-w-0 flex-1 overflow-hidden">

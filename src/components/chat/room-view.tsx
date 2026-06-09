@@ -36,8 +36,9 @@ interface Props {
   allRooms: Room[];
   socket: {
     ready: boolean;
-    lastFrame: WsFrame | null;
     send: (frame: object) => void;
+    // QA §2.1: subscribe to EVERY frame (no coalescing). Returns an unsubscribe.
+    subscribe: (fn: (f: WsFrame) => void) => () => void;
   };
   /** Saved contacts keyed by `${kind}:${id}`. */
   contacts?: Map<string, Contact>;
@@ -57,6 +58,11 @@ interface ProgressEntry {
   note: string;
   updatedAt: number;
   source: "local" | "server";
+  /** §1.2 — determinate progress (0..100) when the silicon reports it. */
+  pct?: number | null;
+  /** §1.6 — public handle of whoever is actually working, so the progress
+   *  avatar isn't a "most recent silicon sender" guess. */
+  handle?: string | null;
 }
 
 const TEMP_ID = (clientId: string) => `temp-${clientId}`;
@@ -105,6 +111,11 @@ const PROGRESS_STATE_COPY: Partial<Record<ProgressState, string[]>> = {
   thinking: SILICON_PROGRESS_COPY,
 };
 const MIN_PROGRESS_STATUS_MS = 1000;
+// §1.1 — progress staleness thresholds. After SOFT with no update we degrade
+// the playful line to an honest "still working, no update for Ns"; after HARD
+// we offer a way to dismiss/refresh in case the silicon died with no `done`.
+const PROGRESS_STALE_SOFT_MS = 30_000;
+const PROGRESS_STALE_HARD_MS = 90_000;
 const PROGRESS_TYPE_MS = { min: 13, max: 24, erase: 8 };
 const MAX_PROGRESS_LINE_CHARS = 64;
 const ROOM_SNIPPET_LIMIT = 40;
@@ -131,7 +142,25 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 
   const [events, setEvents] = React.useState<LocalEvent[]>([]);
   const [loading, setLoading] = React.useState(true);
+  // §2.5 — true only once the live fetch resolves. Auto-read is gated on this so
+  // we never clear unread for messages that are only in the localStorage cache.
+  const [hydrated, setHydrated] = React.useState(false);
   const [activeProgress, setActiveProgress] = React.useState<ProgressEntry | null>(null);
+  // §1.1 — a monotonically-advancing tick used to detect a progress line that
+  // has gone stale (silicon crashed / backend restarted with no `done` frame).
+  const [progressNow, setProgressNow] = React.useState(() => Date.now());
+  // §1.9 — a message arrived while scrolled up; show a "jump to latest" pill.
+  const [unseenBelow, setUnseenBelow] = React.useState(false);
+  // §2.7 — "load older" pagination past the latest 100-event window.
+  const [hasMore, setHasMore] = React.useState(false);
+  const [loadingOlder, setLoadingOlder] = React.useState(false);
+  // §2.2 — deltas/finals that arrive before their creating `event` frame (a
+  // reconnect gap or out-of-order delivery) are buffered by event_id and
+  // flushed onto the event when it lands, so streamed text is never lost.
+  const deltaBufferRef = React.useRef<Map<string, { body: string; final: boolean }>>(new Map());
+  // §2.1 — the live frame handler, reassigned each render so the single
+  // subscription always runs the latest closure.
+  const frameHandlerRef = React.useRef<(f: WsFrame) => void>(() => {});
   const [profileOpen, setProfileOpen] = React.useState(false);
   const [focusSender, setFocusSender] = React.useState<{
     kind: "carbon" | "silicon";
@@ -276,12 +305,15 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     const roomId = room.room_id;
     const cachedEvents = readRoomEventSnippet(roomId);
     setLoading(false);
+    setHydrated(false);
     setEvents(cachedEvents ?? []);
     setActiveProgress(null);
     setActivities({});
     setReplyTo(null);
     setFocusSender(null);
     setProfileOpen(false);
+    setUnseenBelow(false);
+    deltaBufferRef.current.clear();
     api
       .events(roomId, undefined, 100)
       .then((evs) => {
@@ -290,6 +322,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           const pending = prev.filter((e) => e.event_id.startsWith("temp-") || e._status === "pending");
           return mergeServerEvents(pending, evs, myUsername);
         });
+        setHasMore(evs.length >= 100); // §2.7 — a full window may have older history
+        setHydrated(true); // §2.5 — live data is in; auto-read may now run
         setLoading(false);
       })
       .catch((e) => {
@@ -330,15 +364,23 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     if (socket.ready && !prevReadyRef.current) {
       api
         .events(room.room_id, undefined, 100)
-        .then((evs) => setEvents((prev) => mergeServerEvents(prev, evs, myUsername)))
+        .then((evs) => {
+          setEvents((prev) => mergeServerEvents(prev, evs, myUsername));
+          // §1.7 — drop any server-sourced progress that was animating while we
+          // were offline; the task may have finished. A still-working silicon
+          // re-sends a fresh progress frame, which re-establishes the line.
+          setActiveProgress((p) => (p && p.source === "server" ? null : p));
+        })
         .catch(() => undefined);
     }
     prevReadyRef.current = socket.ready;
   }, [socket.ready, room.room_id, myUsername]);
 
+  // §2.1 — the per-frame handler, kept current via a deps-less effect so the
+  // single subscription always runs the latest closure. Processes EVERY frame,
+  // so no delta / receipt / take-back is ever coalesced away.
   React.useEffect(() => {
-    const f = socket.lastFrame;
-    if (!f) return;
+    frameHandlerRef.current = (f: WsFrame) => {
     if ("room_id" in f && f.room_id !== room.room_id) return;
     if (f.type === "event") {
       const incoming = f.event;
@@ -355,11 +397,17 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             note: String(incoming.content.note || ""),
             updatedAt: Date.now(),
             source: "server",
+            pct: numOrNull(incoming.content.progress_pct),
+            handle: incoming.sender_handle,
           });
         }
         return;
       }
       if (!mine && PROGRESS_MESSAGE_TYPES.has(incoming.type)) setActiveProgress(null);
+      // §1.9 — a new message from someone else while scrolled up: surface a pill.
+      if (!mine && PROGRESS_MESSAGE_TYPES.has(incoming.type) && !stickToBottomRef.current) {
+        setUnseenBelow(true);
+      }
       // The received tone is played once, globally, by the chat page (so it
       // fires for any room, not just the open one).
       setEvents((prev) => {
@@ -374,12 +422,20 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           return updated;
         }
         if (mine) {
+          // §2.3 — prefer matching the echo to its optimistic row by the
+          // client id the server echoes back (robust to server-side content
+          // enrichment: media_id, link_preview, whitespace, forward_from).
+          // Fall back to the old content-equality heuristic when absent.
+          const echoedClientId =
+            typeof incoming.content.client_id === "string" ? incoming.content.client_id : null;
           const optIdx = prev.findIndex(
             (e) =>
               e._status === "pending" &&
-              e.sender_handle === incoming.sender_handle &&
-              e.type === incoming.type &&
-              JSON.stringify(e.content) === JSON.stringify(incoming.content),
+              (echoedClientId
+                ? e._clientId === echoedClientId
+                : e.sender_handle === incoming.sender_handle &&
+                  e.type === incoming.type &&
+                  JSON.stringify(e.content) === JSON.stringify(incoming.content)),
           );
           if (optIdx >= 0) {
             const updated = [...prev];
@@ -391,26 +447,53 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             return updated;
           }
         }
-        return [...prev, { ...incoming, _status: mine ? "delivered" : undefined }];
+        // §2.2 — flush any deltas/final that arrived before this creating frame.
+        const buffered = deltaBufferRef.current.get(incoming.event_id);
+        let merged: Event = incoming;
+        if (buffered) {
+          deltaBufferRef.current.delete(incoming.event_id);
+          merged = {
+            ...incoming,
+            is_final: incoming.is_final || buffered.final,
+            content: {
+              ...incoming.content,
+              body: ((incoming.content.body as string) ?? "") + buffered.body,
+            },
+          };
+        }
+        return [...prev, { ...merged, _status: mine ? "delivered" : undefined }];
       });
     } else if (f.type === "event.delta") {
-      setEvents((prev) =>
-        prev.map((e) =>
-          e.event_id === f.event_id
-            ? {
-                ...e,
-                content: {
-                  ...e.content,
-                  body: ((e.content.body as string) ?? "") + f.delta,
-                },
-              }
-            : e,
-        ),
-      );
+      setEvents((prev) => {
+        const idx = prev.findIndex((e) => e.event_id === f.event_id);
+        if (idx < 0) {
+          // §2.2 — creating `event` not here yet; buffer the delta.
+          const buf = deltaBufferRef.current.get(f.event_id) ?? { body: "", final: false };
+          buf.body += f.delta;
+          deltaBufferRef.current.set(f.event_id, buf);
+          return prev;
+        }
+        const updated = [...prev];
+        const e = updated[idx];
+        updated[idx] = {
+          ...e,
+          content: { ...e.content, body: ((e.content.body as string) ?? "") + f.delta },
+        };
+        return updated;
+      });
     } else if (f.type === "event.final") {
-      setEvents((prev) =>
-        prev.map((e) => (e.event_id === f.event_id ? { ...e, is_final: true } : e)),
-      );
+      setEvents((prev) => {
+        const idx = prev.findIndex((e) => e.event_id === f.event_id);
+        if (idx < 0) {
+          const buf = deltaBufferRef.current.get(f.event_id) ?? { body: "", final: false };
+          buf.final = true;
+          deltaBufferRef.current.set(f.event_id, buf);
+          return prev;
+        }
+        const updated = [...prev];
+        updated[idx] = { ...updated[idx], is_final: true };
+        return updated;
+      });
     } else if (f.type === "event.transcript") {
       setEvents((prev) =>
         prev.map((e) =>
@@ -420,14 +503,21 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         ),
       );
     } else if (f.type === "read_receipt") {
-      const cutoff = f.event_id;
-      setEvents((prev) =>
-        prev.map((e) =>
-          e.sender_handle === myUsername && e.event_id <= cutoff
-            ? { ...e, _status: "read" }
-            : e,
-        ),
-      );
+      // §2.6 — mark by POSITION, not string `<=`. String ordering is only valid
+      // for fixed-width Crockford ULIDs; forwarded/UUID-fallback ids break it.
+      setEvents((prev) => {
+        const cutoffIdx = prev.findIndex((e) => e.event_id === f.event_id);
+        if (cutoffIdx < 0) return prev; // cutoff outside our window — don't guess
+        let changed = false;
+        const updated = prev.map((e, i) => {
+          if (i <= cutoffIdx && e.sender_handle === myUsername && e._status !== "read") {
+            changed = true;
+            return { ...e, _status: "read" as MessageStatus };
+          }
+          return e;
+        });
+        return changed ? updated : prev;
+      });
     } else if (f.type === "take_back") {
       setEvents((prev) =>
         prev.map((e) =>
@@ -448,6 +538,8 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             note: f.note || "",
             updatedAt: Date.now(),
             source: "server",
+            pct: numOrNull(f.progress_pct),
+            handle: f.member_handle ?? null,
           });
         }
       }
@@ -477,7 +569,22 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         }
       }
     }
-  }, [socket.lastFrame, room.room_id, myUsername]);
+    };
+  });
+
+  // Subscribe once; the handler ref above carries the latest closure (§2.1).
+  React.useEffect(() => {
+    return socket.subscribe((f) => frameHandlerRef.current(f));
+  }, [socket.subscribe]);
+
+  // §1.1 — while a progress line is showing, advance a 1s tick so we can detect
+  // staleness (the silicon crashed / backend restarted with no `done` frame).
+  React.useEffect(() => {
+    if (!activeProgress) return;
+    setProgressNow(Date.now());
+    const id = window.setInterval(() => setProgressNow(Date.now()), 1000);
+    return () => window.clearInterval(id);
+  }, [activeProgress]);
 
   // ----- Scroll-to-bottom + auto-read -----
   const didInitialScrollRef = React.useRef(false);
@@ -491,7 +598,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     const viewport = scrollViewport();
     if (!viewport) return;
     const onScroll = () => {
-      stickToBottomRef.current = isNearBottom();
+      const near = isNearBottom();
+      stickToBottomRef.current = near;
+      if (near) setUnseenBelow(false); // §1.9 — caught up, hide the pill
     };
     onScroll();
     viewport.addEventListener("scroll", onScroll, { passive: true });
@@ -536,9 +645,10 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 
   React.useEffect(() => {
     if (readOnly) return; // observers don't mark read — they aren't members
+    if (!hydrated) return; // §2.5 — don't mark cached-but-unseen messages read
     if (!lastTheirsEventId) return;
     api.read(room.room_id, lastTheirsEventId).catch(() => undefined);
-  }, [lastTheirsEventId, room.room_id, readOnly]);
+  }, [lastTheirsEventId, room.room_id, readOnly, hydrated]);
 
   // ----- Take-back / self-delete / react / reply / forward -----
   const onTakeBack = async (eventId: string, force = false) => {
@@ -563,6 +673,9 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     const ev = pendingDelete;
     if (!ev) return;
     setPendingDelete(null);
+    // §2.4 — snapshot the prior row so a failed delete can be rolled back
+    // instead of leaving it "deleted" until the next refetch reverts it.
+    const snapshot = events.find((e) => e.event_id === ev.event_id);
     // Optimistically mark redacted so the bubble updates instantly.
     setEvents((prev) =>
       prev.map((e) =>
@@ -576,11 +689,20 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
           : e,
       ),
     );
+    const rollback = () => {
+      if (!snapshot) return;
+      setEvents((prev) => prev.map((e) => (e.event_id === ev.event_id ? snapshot : e)));
+    };
     try {
       const r = await api.deleteEvent(ev.event_id);
-      if (r && "detail" in r) toast.error(r.detail);
-      else toast.success("deleted successfully");
+      if (r && "detail" in r) {
+        rollback();
+        toast.error(r.detail);
+      } else {
+        toast.success("deleted successfully");
+      }
     } catch (e) {
+      rollback();
       toast.error(e instanceof ApiError ? e.message : String(e));
     }
   };
@@ -601,6 +723,7 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     );
     if (existing) {
       // Optimistically drop my reaction, then redact it server-side.
+      const snapshot = existing; // §2.4 — restore the reaction if the redact fails
       setEvents((prev) =>
         prev.map((e) =>
           e.event_id === existing.event_id
@@ -608,10 +731,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
             : e,
         ),
       );
+      const rollback = () =>
+        setEvents((prev) =>
+          prev.map((e) => (e.event_id === snapshot.event_id ? snapshot : e)),
+        );
       try {
         const r = await api.deleteEvent(existing.event_id);
-        if (r && "detail" in r) toast.error(r.detail);
+        if (r && "detail" in r) {
+          rollback();
+          toast.error(r.detail);
+        }
       } catch (e) {
+        rollback();
         toast.error(e instanceof ApiError ? e.message : String(e));
       }
       return;
@@ -817,13 +948,18 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     activeProgress?.roomId === room.room_id &&
     latestVisibleEvent?.sender_kind !== "silicon";
   const progressAvatarHandle = React.useMemo(() => {
+    // §1.6 — prefer the handle the progress frame actually attributed the work
+    // to, instead of guessing "most recent silicon sender".
+    if (activeProgress?.handle) return activeProgress.handle;
     for (let i = visibleEvents.length - 1; i >= 0; i--) {
       const event = visibleEvents[i];
       if (event.sender_kind === "silicon" && event.sender_handle) return event.sender_handle;
     }
     if (peer?.kind === "silicon") return peer.handle;
     return headerSeed;
-  }, [visibleEvents, peer, headerSeed]);
+  }, [activeProgress, visibleEvents, peer, headerSeed]);
+  // §1.1 — how long since the progress line last advanced.
+  const progressStaleMs = activeProgress ? progressNow - activeProgress.updatedAt : 0;
   const progressAvatarSrc = React.useMemo(() => {
     if (!progressAvatarHandle) return headerPhoto;
     return photoFor("silicon", progressAvatarHandle) ?? headerPhoto;
@@ -836,6 +972,46 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
     },
     [],
   );
+
+  // §2.7 — load the previous page of history (the API supports a `before`
+  // cursor). Prepends older events and pins the viewport so the screen doesn't
+  // jump while reading.
+  const loadOlder = React.useCallback(async () => {
+    if (loadingOlder || !hasMore) return;
+    const oldest = events.find((e) => !e.event_id.startsWith("temp-"));
+    if (!oldest) return;
+    setLoadingOlder(true);
+    const viewport = scrollViewport();
+    const prevHeight = viewport?.scrollHeight ?? 0;
+    const prevTop = viewport?.scrollTop ?? 0;
+    try {
+      const older = await api.events(room.room_id, oldest.event_id, 100);
+      if (older.length === 0) {
+        setHasMore(false);
+        return;
+      }
+      setEvents((prev) => {
+        const known = new Set(prev.map((e) => e.event_id));
+        const fresh: LocalEvent[] = older
+          .filter((e) => !known.has(e.event_id))
+          .map((e) => ({
+            ...e,
+            _status: e.sender_handle === myUsername ? ("delivered" as MessageStatus) : undefined,
+          }));
+        return [...fresh, ...prev];
+      });
+      setHasMore(older.length >= 100);
+      // Keep the reader's position fixed across the prepend.
+      requestAnimationFrame(() => {
+        const vp = scrollViewport();
+        if (vp) vp.scrollTop = vp.scrollHeight - prevHeight + prevTop;
+      });
+    } catch (e) {
+      toast.error(e instanceof ApiError ? e.message : String(e));
+    } finally {
+      setLoadingOlder(false);
+    }
+  }, [loadingOlder, hasMore, events, room.room_id, myUsername, scrollViewport]);
 
   return (
     // `min-h-0` is the key — without it, a flex child grows to its content's
@@ -965,10 +1141,25 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
         focusSender={focusSender}
       />
 
-      <ScrollArea ref={scrollRootRef} className="flex-1">
+      {/* data-private masks all message text out of PostHog session replays
+          (see instrumentation-client.ts maskTextSelector). */}
+      <ScrollArea ref={scrollRootRef} className="flex-1" data-private>
         {/* Messages bleed to the same horizontal margins as the navbar's
             logo (left) and avatar (right) — px-6 matches the app shell. */}
         <div className="w-full px-6 py-4">
+          {/* §2.7 — load older history (only outside an active search). */}
+          {!search && hasMore && filteredEvents.length > 0 ? (
+            <div className="flex justify-center pb-3">
+              <button
+                type="button"
+                onClick={loadOlder}
+                disabled={loadingOlder}
+                className="label-mono text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline disabled:opacity-60"
+              >
+                {loadingOlder ? "loading…" : "load earlier messages"}
+              </button>
+            </div>
+          ) : null}
           {loading ? (
             <div className="text-sm text-muted-foreground">loading messages…</div>
           ) : filteredEvents.length === 0 ? (
@@ -1024,11 +1215,28 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
               avatarSeed={progressAvatarHandle || headerSeed}
               avatarSrc={progressAvatarSrc}
               avatarFamily={peer?.kind === "silicon" ? "silicon" : "carbon"}
+              staleMs={progressStaleMs}
+              onDismiss={() => setActiveProgress(null)}
             />
           ) : null}
           <div ref={endRef} />
         </div>
       </ScrollArea>
+
+      {/* §1.9 — when a message arrives while scrolled up, surface a pill to
+          jump back to the latest instead of silently appending below the fold. */}
+      {unseenBelow && !readOnly ? (
+        <button
+          type="button"
+          onClick={() => {
+            setUnseenBelow(false);
+            requestBottomStick("smooth");
+          }}
+          className="absolute bottom-24 left-1/2 z-10 -translate-x-1/2 border border-foreground bg-foreground px-3 py-1.5 text-xs font-medium text-background shadow-none transition-opacity hover:opacity-90"
+        >
+          ↓ new messages
+        </button>
+      ) : null}
 
       {readOnly ? (
         <div className="flex items-center justify-center gap-2 border-t bg-muted/40 px-6 py-4 text-xs text-muted-foreground">
@@ -1088,6 +1296,66 @@ export function RoomView({ room, allRooms, socket, contacts, onContactsChanged }
 }
 
 function ProgressLine({
+  entry,
+  avatarSeed,
+  avatarSrc,
+  avatarFamily,
+  staleMs = 0,
+  onDismiss,
+}: {
+  entry: ProgressEntry;
+  avatarSeed: string;
+  avatarSrc?: string | null;
+  avatarFamily?: "carbon" | "silicon";
+  staleMs?: number;
+  onDismiss?: () => void;
+}) {
+  // §1.1 — once the line stops advancing, stop pretending it's lively. After a
+  // soft threshold show an honest "still working" line; after a hard one offer
+  // a way out in case the silicon died without a `done` frame.
+  const stale = staleMs >= PROGRESS_STALE_SOFT_MS;
+  const dead = staleMs >= PROGRESS_STALE_HARD_MS;
+  if (stale) {
+    const secs = Math.round(staleMs / 1000);
+    return (
+      <div className="my-2 flex w-full items-start gap-2">
+        <div className="w-7 shrink-0">
+          <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "carbon"} />
+        </div>
+        <div className="min-w-0 max-w-[70%] space-y-1">
+          <ProgressBar pct={entry.pct} />
+          <span className="block text-sm text-muted-foreground">
+            {dead ? "still working — no update for a while." : `still working — no update for ${secs}s.`}
+          </span>
+          {dead && onDismiss ? (
+            <button
+              type="button"
+              onClick={onDismiss}
+              className="label-mono text-[11px] text-muted-foreground underline-offset-2 hover:text-foreground hover:underline"
+            >
+              dismiss
+            </button>
+          ) : null}
+        </div>
+      </div>
+    );
+  }
+  return <ProgressLineLive entry={entry} avatarSeed={avatarSeed} avatarSrc={avatarSrc} avatarFamily={avatarFamily} />;
+}
+
+/** §1.2 — determinate "compile bar" `[####------] 42%` when a pct is known. */
+function ProgressBar({ pct }: { pct?: number | null }) {
+  if (pct == null) return null;
+  const filled = Math.round((pct / 100) * 10);
+  const bar = "#".repeat(filled) + "-".repeat(Math.max(0, 10 - filled));
+  return (
+    <span className="block font-mono text-xs tabular-nums text-muted-foreground">
+      [{bar}] {Math.round(pct)}%
+    </span>
+  );
+}
+
+function ProgressLineLive({
   entry,
   avatarSeed,
   avatarSrc,
@@ -1211,6 +1479,8 @@ function ProgressLine({
         <IdAvatar seed={avatarSeed || "?"} src={avatarSrc} size={28} family={avatarFamily ?? "carbon"} />
       </div>
       <div className="min-w-0 max-w-[70%]">
+        {/* \u00a71.2 \u2014 determinate bar above the playful line when pct is reported. */}
+        <ProgressBar pct={entry.pct} />
         <span className="silicon-activity-line flex min-h-7 items-center text-sm">
           <span className="inline-flex min-w-0 max-w-full items-center gap-3 overflow-hidden">
             <span className="silicon-activity-copy">
@@ -1376,6 +1646,13 @@ function isMyEvent(e: Event, myUsername: string | null) {
   return e.sender_kind === "carbon" && e.sender_handle === myUsername;
 }
 
+/** Coerce an unknown wire value to a finite number in 0..100, else null. */
+function numOrNull(value: unknown): number | null {
+  const n = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.max(0, Math.min(100, n));
+}
+
 /**
  * Reconcile a fresh server snapshot with our locally-tracked events without
  * blowing away optimistic rows or hard-won _status upgrades.
@@ -1409,7 +1686,9 @@ function formatActivities(
     handles.length === 1
       ? handles[0]
       : `${handles.slice(0, -1).join(", ")} & ${handles.slice(-1)}`;
-  return `${who} is ${verb}…`;
+  // §1.10 — agree the verb in number: "@a is typing…" vs "@a & @b are typing…".
+  const aux = handles.length === 1 ? "is" : "are";
+  return `${who} ${aux} ${verb}…`;
 }
 
 function roomSnippetKey(roomId: string): string {

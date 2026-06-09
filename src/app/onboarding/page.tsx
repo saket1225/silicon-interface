@@ -10,6 +10,7 @@ import { authStore } from "@/lib/auth";
 import { track } from "@/lib/analytics";
 import { generateAndStoreAvatar } from "@/lib/avatar";
 import { suggestCarbonId } from "@/lib/email";
+import { safeSession } from "@/lib/safe-storage";
 
 import { Logo } from "@/components/logo";
 import { IdAvatar } from "@/components/profile/id-avatar";
@@ -93,13 +94,13 @@ function OnboardingInner() {
   // Pull flowId + the email hint once on mount. If flowId is missing, kick
   // back to register; if email is present, pre-seed carbon ID + name.
   React.useEffect(() => {
-    const f = window.sessionStorage.getItem(FLOW_KEY);
+    const f = safeSession.get(FLOW_KEY);
     if (!f) {
       router.replace("/auth/register");
       return;
     }
     setFlowId(f);
-    const e = window.sessionStorage.getItem(EMAIL_KEY) ?? "";
+    const e = safeSession.get(EMAIL_KEY) ?? "";
     setEmailHint(e);
     if (e) {
       const suggested = suggestCarbonId(e);
@@ -213,8 +214,8 @@ function OnboardingInner() {
         } else {
           void generateAndStoreAvatar(session.carbon.carbon_id);
         }
-        window.sessionStorage.removeItem(FLOW_KEY);
-        window.sessionStorage.removeItem(EMAIL_KEY);
+        safeSession.remove(FLOW_KEY);
+        safeSession.remove(EMAIL_KEY);
         setStep((s) => s + 1);
       } catch (e) {
         toast.error(e instanceof ApiError ? e.message : String(e));
@@ -238,9 +239,19 @@ function OnboardingInner() {
       // For the Carbon-ID step, Enter is only meaningful when the field is
       // valid + available.
       if (step === 2 && !carbonIdReady) return;
-      // Allow Enter inside textarea / multi-line surfaces to insert newlines.
+      // Don't hijack Enter while a text field is focused. The preview screen
+      // has name/bio <input>s and the Carbon-ID screen its own <input>; a
+      // global Enter that finalizes the whole flow from inside any of these is
+      // surprising (the user is just confirming a field). Exempt textareas
+      // (newlines) AND any focused text input — including contentEditable — so
+      // Enter only advances when focus is on the page body / CTA itself.
       const target = e.target as HTMLElement | null;
-      if (target?.tagName === "TEXTAREA") return;
+      const tag = target?.tagName;
+      const isTextInput =
+        tag === "TEXTAREA" ||
+        tag === "INPUT" ||
+        target?.isContentEditable === true;
+      if (isTextInput) return;
       e.preventDefault();
       void next();
     };
@@ -281,6 +292,13 @@ function OnboardingInner() {
                   autoFocus
                   value={carbonId}
                   onChange={(e) => setCarbonId(e.target.value.toLowerCase())}
+                  onKeyDown={(e) => {
+                    // The global Enter handler now exempts inputs (so Enter in
+                    // name/bio doesn't finalize the flow), so the Carbon-ID
+                    // field advances explicitly — but only once it's valid and
+                    // available.
+                    if (e.key === "Enter" && carbonIdReady) void next();
+                  }}
                   placeholder="your-carbon-id"
                   className="h-14 w-full min-w-0 bg-transparent px-2 text-2xl font-medium tracking-tight outline-none placeholder:text-muted-foreground"
                 />
