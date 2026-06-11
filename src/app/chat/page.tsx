@@ -472,6 +472,15 @@ function ChatPageInner() {
       });
     } else if (f.type === "room.added") {
       if (!roomsRef.current.some((r) => r.room_id === f.room_id)) void refresh();
+    } else if (f.type === "announcement") {
+      // a team announcement — desktop push + live bell refresh
+      showBrowserNotification(f.announcement.title, {
+        body: f.announcement.body,
+        tag: `announcement-${f.announcement.id}`,
+      });
+      window.dispatchEvent(
+        new CustomEvent("silicon-interface:announcement", { detail: f.announcement }),
+      );
     }
     // §1d — track which rooms have a silicon mid-task so the sidebar can shimmer
     // them even when not open. Progress frames (and m.progress events) drive it.

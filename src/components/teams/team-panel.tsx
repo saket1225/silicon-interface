@@ -298,7 +298,7 @@ function MembersPreview({
   members: TeamMembership[];
   onViewAll: () => void;
 }) {
-  const visibleMembers = members.filter((m) => !isHiddenInterfaceMember(m));
+  const visibleMembers = members;
   const orderedMembers = [...visibleMembers].sort((a, b) => {
     if (a.member_kind !== b.member_kind) return a.member_kind === "carbon" ? -1 : 1;
     return teamMemberHandle(a).localeCompare(teamMemberHandle(b));
@@ -343,7 +343,7 @@ function MembersPreview({
 
 function MembersSection({ members }: { members: TeamMembership[] }) {
   const [active, setActive] = React.useState<"carbon" | "silicon">("carbon");
-  const visibleMembers = members.filter((m) => !isHiddenInterfaceMember(m));
+  const visibleMembers = members;
   const carbons = visibleMembers.filter((m) => m.member_kind === "carbon");
   const silicons = visibleMembers.filter((m) => m.member_kind === "silicon");
   const rows = active === "carbon" ? carbons : silicons;
@@ -394,18 +394,14 @@ function MembersSection({ members }: { members: TeamMembership[] }) {
   );
 }
 
-function isHiddenInterfaceMember(m: TeamMembership): boolean {
-  const handle = (m.member_handle || "").toLowerCase();
-  return m.member_kind === "carbon" && (handle === "lords" || handle === "lords@unlikefraction.com");
-}
-
+// Lords never reach the interface — Glass filters them out of members and
+// heads server-side, so no client-side masking is needed.
 function memberAvatarFamily(m: TeamMembership): "carbon" | "silicon" {
   return m.member_kind === "silicon" ? "silicon" : "carbon";
 }
 
 function teamMemberHandle(m: TeamMembership): string {
   const handle = m.member_handle || "";
-  if (handle.toLowerCase() === "lords@unlikefraction.com") return "@lords";
   return handle ? `@${handle}` : `${m.member_kind} #${m.member_id}`;
 }
 

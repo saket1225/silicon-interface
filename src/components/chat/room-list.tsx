@@ -53,7 +53,7 @@ export function RoomList({
   if (!loading && rooms.length === 0) {
     return (
       <div className={cn("flex min-h-0 flex-1 flex-col bg-background", className)}>
-        <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 text-center">
+        <div className="flex flex-1 flex-col items-center justify-center gap-4 px-6 pb-28 text-center">
           <p className="text-sm text-muted-foreground">No conversations yet.</p>
           <Button onClick={onNew}>Start a new chat</Button>
         </div>

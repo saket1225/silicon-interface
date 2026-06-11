@@ -1,39 +1,38 @@
 "use client";
 
 import * as React from "react";
-import { useRouter } from "next/navigation";
-import { Bell, Check, Trash, X } from "@phosphor-icons/react/dist/ssr";
+import { Bell, X } from "@phosphor-icons/react/dist/ssr";
 
-import {
-  clearNotifications,
-  loadNotifications,
-  loadUnreadCount,
-  markAllNotificationsRead,
-  markNotificationRead,
-  NOTIFICATION_EVENT,
-  NOTIFICATION_NAVIGATE_EVENT,
-  trimmedCount,
-  type InterfaceNotification,
-} from "@/lib/notifications";
+import { api } from "@/lib/api";
+import type { Announcement } from "@/lib/types";
 import { cn, relativeTime } from "@/lib/utils";
 import { printConsoleBanner } from "@/lib/console-banner";
 
-import { Button } from "@/components/ui/button";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
-import { IdAvatar } from "@/components/profile/id-avatar";
 
+const ANNOUNCEMENT_EVENT = "silicon-interface:announcement";
+
+function seenKey(ownerId: string) {
+  return `silicon-interface:announcements-seen:${encodeURIComponent(ownerId)}`;
+}
+
+function loadSeen(ownerId: string): number {
+  try {
+    return Number(window.localStorage.getItem(seenKey(ownerId)) ?? 0) || 0;
+  } catch {
+    return 0;
+  }
+}
+
+/** The bell — team announcements: product news, new updates. */
 export function NotificationCenter({ ownerId }: { ownerId: string }) {
-  const router = useRouter();
   const [open, setOpen] = React.useState(false);
-  const [items, setItems] = React.useState<InterfaceNotification[]>([]);
-  // Unread is read from the decoupled store counter, not derived from `items`,
-  // so it stays accurate even when older unread notifications fall out of the
-  // kept window. `trimmed` drives the "showing latest N" affordance.
-  const [unread, setUnread] = React.useState(0);
-  const [trimmed, setTrimmed] = React.useState(0);
-  // §4a — one-step scale pop when the unread count *rises*. We bump a key so the
-  // badge remounts its animation; the previous count is held in a ref so a
-  // re-render that doesn't change `unread` never re-fires the pop.
+  const [items, setItems] = React.useState<Announcement[]>([]);
+  const [seen, setSeen] = React.useState(0);
+
+  const unread = items.filter((a) => a.id > seen).length;
+
+  // §4a — one-step scale pop when the unread count *rises*.
   const prevUnread = React.useRef(unread);
   const [bump, setBump] = React.useState(0);
   React.useEffect(() => {
@@ -42,54 +41,45 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
   }, [unread]);
 
   const reload = React.useCallback(() => {
-    setItems(loadNotifications(ownerId));
-    setUnread(loadUnreadCount(ownerId));
-    setTrimmed(trimmedCount(ownerId));
-  }, [ownerId]);
+    api
+      .announcements()
+      .then(setItems)
+      .catch(() => undefined);
+  }, []);
 
   React.useEffect(() => {
-    // Mount-time read of client-only, localStorage-backed notifications.
+    setSeen(loadSeen(ownerId));
     reload();
-    // §7f — this client component always mounts in the chat shell, so it's a
-    // reliable place to print the devtools banner once (guarded module-side).
     printConsoleBanner();
-  }, [reload]);
+  }, [ownerId, reload]);
 
+  // A live announcement frame landed on the socket — fold it in.
   React.useEffect(() => {
-    const onChanged = (event: Event) => {
-      const detail = (event as CustomEvent<{ ownerId?: string }>).detail;
-      if (!detail?.ownerId || detail.ownerId === ownerId) reload();
+    const onAnnouncement = (event: Event) => {
+      const a = (event as CustomEvent<Announcement>).detail;
+      if (!a?.id) return;
+      setItems((prev) => (prev.some((x) => x.id === a.id) ? prev : [a, ...prev]));
     };
-    // Cross-tab: only react to *this* owner's key. The previous prefix match
-    // reloaded on any owner's notifications, so a second account in another tab
-    // would churn this list.
-    const onStorage = (event: StorageEvent) => {
-      if (event.key === `silicon-interface:notifications:${encodeURIComponent(ownerId)}`) reload();
-    };
-    // Soft route when an OS notification is clicked — keeps the live socket.
-    const onNavigate = (event: Event) => {
-      const detail = (event as CustomEvent<{ roomId?: string }>).detail;
-      if (detail?.roomId) router.push(`/chat?room=${encodeURIComponent(detail.roomId)}`);
-    };
-    window.addEventListener(NOTIFICATION_EVENT, onChanged);
-    window.addEventListener("storage", onStorage);
-    window.addEventListener(NOTIFICATION_NAVIGATE_EVENT, onNavigate);
-    return () => {
-      window.removeEventListener(NOTIFICATION_EVENT, onChanged);
-      window.removeEventListener("storage", onStorage);
-      window.removeEventListener(NOTIFICATION_NAVIGATE_EVENT, onNavigate);
-    };
-  }, [ownerId, reload, router]);
+    window.addEventListener(ANNOUNCEMENT_EVENT, onAnnouncement);
+    return () => window.removeEventListener(ANNOUNCEMENT_EVENT, onAnnouncement);
+  }, []);
 
-  const openRoom = (item: InterfaceNotification) => {
-    markNotificationRead(ownerId, item.id);
-    reload();
-    setOpen(false);
-    router.push(`/chat?room=${encodeURIComponent(item.roomId)}`);
+  // Opening the inbox is seeing it.
+  const onOpenChange = (next: boolean) => {
+    setOpen(next);
+    if (next && items.length > 0) {
+      const top = items[0].id;
+      try {
+        window.localStorage.setItem(seenKey(ownerId), String(top));
+      } catch {
+        /* private mode — fine */
+      }
+      setSeen(top);
+    }
   };
 
   return (
-    <Popover open={open} onOpenChange={setOpen}>
+    <Popover open={open} onOpenChange={onOpenChange}>
       <PopoverTrigger asChild>
         <button
           type="button"
@@ -126,37 +116,6 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
           </button>
         </div>
 
-        <div className="flex items-center justify-end gap-2 border-b px-4 py-2">
-          <div className="flex shrink-0 items-center gap-1">
-            <Button
-              size="icon"
-              variant="ghost"
-              title="mark all read"
-              aria-label="mark all notifications read"
-              disabled={items.length === 0 || unread === 0}
-              onClick={() => {
-                markAllNotificationsRead(ownerId);
-                reload();
-              }}
-            >
-              <Check className="h-4 w-4" />
-            </Button>
-            <Button
-              size="icon"
-              variant="ghost"
-              title="clear"
-              aria-label="clear notifications"
-              disabled={items.length === 0}
-              onClick={() => {
-                clearNotifications(ownerId);
-                reload();
-              }}
-            >
-              <Trash className="h-4 w-4" />
-            </Button>
-          </div>
-        </div>
-
         <div className="max-h-[420px] overflow-y-auto">
           {items.length === 0 ? (
             <div className="px-4 py-8 text-center font-mono text-xs text-muted-foreground">
@@ -171,45 +130,61 @@ export function NotificationCenter({ ownerId }: { ownerId: string }) {
             </div>
           ) : (
             <ul className="divide-y">
-              {items.map((item) => (
-                <li key={item.id}>
-                  <button
-                    type="button"
-                    onClick={() => openRoom(item)}
-                    className={cn(
-                      "grid w-full grid-cols-[36px_minmax(0,1fr)] gap-3 px-4 py-3 text-left transition-colors hover:bg-accent",
-                      !item.read && "bg-secondary/70",
-                    )}
-                  >
-                    <IdAvatar
-                      seed={item.avatarSeed ?? item.roomId}
-                      src={item.avatarUrl ?? null}
-                      size={36}
-                    />
-                    <span className="min-w-0">
-                      <span className="flex min-w-0 items-center justify-between gap-3">
-                        <span className="min-w-0 truncate text-sm font-semibold">{item.title}</span>
-                        <span className="shrink-0 text-[10px] text-muted-foreground">
-                          {relativeTime(item.at)}
+              {items.map((item) => {
+                const isUnread = item.id > seen;
+                const inner = (
+                  <span className="block min-w-0">
+                    <span className="flex min-w-0 items-center justify-between gap-3">
+                      <span className="flex min-w-0 items-center gap-2">
+                        <span
+                          className={cn(
+                            "label-mono shrink-0 border px-1.5 py-0.5",
+                            isUnread && "bg-foreground text-background",
+                          )}
+                        >
+                          {item.kind}
+                        </span>
+                        <span className="min-w-0 truncate text-sm font-semibold">
+                          {item.title}
                         </span>
                       </span>
-                      <span className="mt-0.5 block truncate text-xs text-muted-foreground">
-                        {item.body}
+                      <span className="shrink-0 text-[10px] text-muted-foreground">
+                        {relativeTime(item.created_at)}
                       </span>
                     </span>
-                  </button>
-                </li>
-              ))}
+                    {item.body ? (
+                      <span className="mt-1 block text-xs text-muted-foreground">
+                        {item.body}
+                      </span>
+                    ) : null}
+                  </span>
+                );
+                return (
+                  <li key={item.id}>
+                    {item.url ? (
+                      <a
+                        href={item.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className={cn(
+                          "block px-4 py-3 transition-colors hover:bg-accent",
+                          isUnread && "bg-secondary/70",
+                        )}
+                      >
+                        {inner}
+                      </a>
+                    ) : (
+                      <div className={cn("px-4 py-3", isUnread && "bg-secondary/70")}>
+                        {inner}
+                      </div>
+                    )}
+                  </li>
+                );
+              })}
             </ul>
           )}
-          {trimmed > 0 ? (
-            <div className="border-t px-4 py-2 text-center text-[10px] text-muted-foreground">
-              showing latest {items.length} · {trimmed} older not shown
-            </div>
-          ) : null}
         </div>
       </PopoverContent>
     </Popover>
   );
 }
-

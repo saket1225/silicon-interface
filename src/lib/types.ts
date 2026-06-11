@@ -411,8 +411,18 @@ export interface TakeBackRequest {
 }
 
 // ---- WebSocket frames ----
+export interface Announcement {
+  id: number;
+  title: string;
+  body: string;
+  url: string;
+  kind: "announcement" | "update";
+  created_at: string;
+}
+
 export type WsFrame =
   | { type: "hello"; subscribed_rooms: string[] }
+  | { type: "announcement"; announcement: Announcement }
   | { type: "pong" }
   | { type: "event"; room_id: string; event: Event }
   | { type: "event.delta"; room_id: string; event_id: string; delta: string; seq: number }

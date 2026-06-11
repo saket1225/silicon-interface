@@ -3,6 +3,7 @@
 import { env } from "./env";
 import { authStore } from "./auth";
 import type {
+  Announcement,
   AuthSession,
   BillingAddon,
   BillingCycle,
@@ -464,6 +465,11 @@ export const api = {
   patchCron: (cron_id: string, patch: Partial<{ trigger: string; task: string; is_active: boolean }>) =>
     call<CronWriteResult>("PATCH", `/api/v1/crons/${cron_id}`, patch),
   deleteCron: (cron_id: string) => call<void>("DELETE", `/api/v1/crons/${cron_id}`),
+
+  // -------- announcements --------
+  announcements: () => call<Announcement[]>("GET", "/api/v1/announcements"),
+  pushAnnouncement: (data: { title: string; body?: string; url?: string; kind?: "announcement" | "update" }) =>
+    call<Announcement>("POST", "/api/v1/announcements", data),
 
   // -------- cost (staff) --------
   costSummary: () =>
