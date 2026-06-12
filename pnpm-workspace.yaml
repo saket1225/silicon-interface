@@ -1,6 +1,12 @@
 packages:
   - packages/*
+  - desktop
 
 ignoredBuiltDependencies:
   - sharp
   - unrs-resolver
+
+# electron's postinstall downloads the platform binary — required for the
+# desktop build (pnpm 10 blocks build scripts unless approved here).
+onlyBuiltDependencies:
+  - electron

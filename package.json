@@ -8,7 +8,11 @@
     "start": "next start",
     "lint": "eslint",
     "silicon-interface": "node ./packages/silicon-interface-cli/bin/silicon-interface.mjs",
-    "si": "node ./packages/silicon-interface-cli/bin/silicon-interface.mjs"
+    "si": "node ./packages/silicon-interface-cli/bin/silicon-interface.mjs",
+    "desktop:build": "NEXT_OUTPUT=standalone NEXT_PUBLIC_API_BASE=https://glass.teamofsilicons.com NEXT_PUBLIC_WS_BASE=wss://glass.teamofsilicons.com next build && node desktop/assemble.mjs",
+    "desktop:dist:win": "pnpm desktop:build && pnpm -C desktop dist:win",
+    "desktop:dist:linux": "pnpm desktop:build && pnpm -C desktop dist:linux",
+    "desktop:dist:mac": "pnpm desktop:build && pnpm -C desktop dist:mac"
   },
   "dependencies": {
     "@phosphor-icons/react": "^2.1.10",
