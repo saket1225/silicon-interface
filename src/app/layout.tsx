@@ -2,6 +2,8 @@ import type { Metadata } from "next";
 import { JetBrains_Mono, TikTok_Sans } from "next/font/google";
 import { Toaster } from "sonner";
 
+import { PushInit } from "@/components/push-init";
+
 import "./globals.css";
 
 // Two faces for a more dynamic feel: TikTok Sans is the workhorse (body,
@@ -31,6 +33,7 @@ export default function RootLayout({
           other auth/landing pages by virtue of their own min-h-screen flex
           containers, which still render correctly inside an h-full body. */}
       <body className="flex h-full flex-col bg-background text-foreground">
+        <PushInit />
         {children}
         {/* Sonner — brand-themed. richColors would override our palette, so
             we drop it and supply colored swatches via toastOptions classes.

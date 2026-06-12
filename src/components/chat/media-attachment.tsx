@@ -109,12 +109,14 @@ export function MediaAttachment({
     retriedRef.current = false;
     setPollExhausted(false);
     let attempts = 0;
+    let errors = 0;
     let timer: ReturnType<typeof setTimeout> | null = null;
 
     const poll = async () => {
       try {
         const r = await api.mediaDetail(mediaId);
         if (!alive) return;
+        errors = 0;
         setMedia(r.media);
         setUrl(r.download_url);
         // Keep polling only while the object is still being produced and we
@@ -130,7 +132,16 @@ export function MediaAttachment({
           timer = setTimeout(poll, POLL_INTERVAL_MS);
         }
       } catch {
-        if (alive) setFailed(true);
+        if (!alive) return;
+        // One dropped request must not brand the attachment "unavailable"
+        // forever — a timeline mounting dozens of bubbles makes transient
+        // fetch failures routine. Back off and retry before giving up.
+        errors += 1;
+        if (errors < 4) {
+          timer = setTimeout(poll, 1000 * errors);
+          return;
+        }
+        setFailed(true);
       }
     };
     void poll();

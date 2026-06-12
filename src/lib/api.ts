@@ -124,6 +124,13 @@ async function call<T>(
 }
 
 export const api = {
+  // -------- web push --------
+  pushVapidKey: () => call<{ public_key: string }>("GET", "/api/v1/push/vapid-key"),
+  pushSubscribe: (sub: PushSubscriptionJSON) =>
+    call<{ subscribed: boolean }>("POST", "/api/v1/push/subscribe", sub),
+  pushUnsubscribe: (endpoint: string) =>
+    call<{ ok: boolean }>("POST", "/api/v1/push/unsubscribe", { endpoint }),
+
   // -------- health / dev --------
   healthz: () => call<{ status: string }>("GET", "/healthz", undefined, { auth: false }),
   readyz: () => call<{ ready: boolean; checks: Record<string, string> }>("GET", "/readyz", undefined, { auth: false }),

@@ -13,13 +13,13 @@ interface LogoProps {
 /**
  * The Silicon Interface logo. Centralizes the brand mark so it can be swapped
  * in one place everywhere it's used (landing, navbar, auth). The asset lives at
- * `public/logo.png` — replace that file to rebrand.
+ * `public/logo.svg` — replace that file to rebrand.
  */
 export function Logo({ size = 28, withWordmark = false, className }: LogoProps) {
   return (
     <span className={cn("inline-flex items-center gap-2", className)}>
       <Image
-        src="/logo.png"
+        src="/logo.svg"
         alt=""
         aria-hidden
         width={size}

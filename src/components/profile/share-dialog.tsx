@@ -112,7 +112,7 @@ export function ShareDialog({
               marginSize={2}
               style={{ width: QR_DISPLAY_SIZE, height: QR_DISPLAY_SIZE }}
               imageSettings={{
-                src: "/logo.png",
+                src: "/logo-qr.svg",
                 width: Math.round(QR_RENDER_SIZE * QR_LOGO_FRACTION),
                 height: Math.round(QR_RENDER_SIZE * QR_LOGO_FRACTION),
                 excavate: true,
@@ -268,13 +268,13 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
   );
 
   // ---- Eyebrow: logo + wordmark, centered near the top
-  // QA medium: if `/logo.png` is served from a CDN that doesn't return CORS
+  // QA medium: if `/logo.svg` is served from a CDN that doesn't return CORS
   // headers, drawing it taints the canvas and the later `toDataURL` throws a
   // SecurityError that aborts the whole export. The logo is decorative, so we
   // load it best-effort and fall back to wordmark-only rather than risk the
   // download. (loadImage already requests crossOrigin="anonymous"; a clean CDN
   // keeps the canvas exportable, a misconfigured one just drops the glyph.)
-  const logo = await loadImage("/logo.png").catch(() => null);
+  const logo = await loadImage("/logo.svg").catch(() => null);
   const logoH = 36;
   const logoW = logo ? (logo.width / logo.height) * logoH : 0;
   const wordmark = "Silicon Interface";
@@ -346,7 +346,7 @@ async function buildShareCard({ qr, carbonId, name, link }: BuildArgs): Promise<
   ctx.font = '500 18px "JetBrains Mono", ui-monospace, monospace';
   ctx.fillText(truncateMid(link, ctx, maxIdentityW), W / 2, cursorY);
 
-  // ---- Trigger download. A same-origin /logo.png keeps the canvas clean; if
+  // ---- Trigger download. A same-origin /logo.svg keeps the canvas clean; if
   // it's served cross-origin without CORS, the embedded logo (in the QR and/or
   // eyebrow) taints the canvas and toDataURL throws a SecurityError. Translate
   // that into an actionable message instead of leaking the raw DOMException.

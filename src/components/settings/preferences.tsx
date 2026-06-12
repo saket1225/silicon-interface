@@ -1,7 +1,9 @@
 "use client";
 
 import * as React from "react";
+import { toast } from "sonner";
 
+import { disablePush, enablePush, isPushEnabled, pushSupported } from "@/lib/push";
 import { cn } from "@/lib/utils";
 
 // Sound preferences. Persist to localStorage; sounds read the same
@@ -71,12 +73,47 @@ export function PreferencesSection() {
   // Hydration-safe: localStorage isn't readable on the server, so we read after
   // mount. Defaults match the "on" baseline the helper falls back to.
   const [sounds, setSounds] = React.useState(true);
+  const [pushAvailable, setPushAvailable] = React.useState(false);
+  const [push, setPush] = React.useState(false);
+  const [pushBusy, setPushBusy] = React.useState(false);
 
   React.useEffect(() => {
     // Read persisted prefs once after mount (localStorage is client-only).
     // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time hydration of client-only storage
     setSounds(readSounds());
+    if (pushSupported()) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- mount-time hydration of client-only state
+      setPushAvailable(true);
+      void isPushEnabled().then(setPush);
+    }
   }, []);
+
+  const togglePush = async (next: boolean) => {
+    setPushBusy(true);
+    try {
+      if (next) {
+        const result = await enablePush();
+        if (result === "enabled") {
+          setPush(true);
+          toast.success("push notifications on");
+        } else if (result === "denied") {
+          toast.error("notifications are blocked for this site — allow them in the browser");
+        } else if (result === "unconfigured") {
+          toast.error("push isn't configured on this server yet");
+        } else {
+          toast.error("this browser doesn't support push");
+        }
+      } else {
+        await disablePush();
+        setPush(false);
+        toast.success("push notifications off");
+      }
+    } catch {
+      toast.error("couldn't update push subscription");
+    } finally {
+      setPushBusy(false);
+    }
+  };
 
   return (
     <section className="border-t pt-5">
@@ -91,6 +128,16 @@ export function PreferencesSection() {
             writeSounds(next);
           }}
         />
+        {pushAvailable && (
+          <div className={pushBusy ? "pointer-events-none opacity-60" : undefined}>
+            <Toggle
+              label="Push notifications"
+              description="Messages and announcements reach this browser even when the tab is closed."
+              checked={push}
+              onChange={(next) => void togglePush(next)}
+            />
+          </div>
+        )}
       </div>
     </section>
   );
